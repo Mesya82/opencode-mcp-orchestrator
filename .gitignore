@@ -1,0 +1,32 @@
+# Dependencies
+node_modules/
+
+# Build/release output
+dist/
+release/
+
+# Local orchestrator configuration
+config/config.local.json
+
+# Environment / secrets
+.env
+.env.*
+*.key
+*.pem
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*~
+*.swp
+
+# Temporary files
+*.tmp
+*.bak

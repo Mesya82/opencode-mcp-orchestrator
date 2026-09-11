@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PRODUCT="opencode-mcp-orchestrator"
+DEFAULT_REPOSITORY="@@REPOSITORY@@"
+
+REPOSITORY="${OPENCODE_MCP_ORCHESTRATOR_REPO:-$DEFAULT_REPOSITORY}"
+RELEASE_BASE="${OPENCODE_MCP_ORCHESTRATOR_RELEASE_BASE:-}"
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+for command in curl tar sha256sum awk mktemp; do
+  command -v "$command" >/dev/null 2>&1 \
+    || die "required command not found: $command"
+done
+
+if [[ -z "$RELEASE_BASE" ]]; then
+  if [[ "$REPOSITORY" == OWNER/* ]]; then
+    die "release repository is not configured"
+  fi
+
+  RELEASE_BASE="https://github.com/${REPOSITORY}/releases/latest/download"
+fi
+
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/${PRODUCT}-bootstrap-XXXXXX")"
+
+cleanup() {
+  rm -rf "$TMP"
+}
+
+trap cleanup EXIT INT TERM
+
+echo "OpenCode MCP Orchestrator"
+echo
+echo "Fetching release metadata..."
+
+CURL_ARGS=(
+  -fsSL
+  --retry 3
+  --retry-delay 1
+)
+
+if [[ "$RELEASE_BASE" == https://* ]]; then
+  CURL_ARGS+=(
+    --proto '=https'
+  )
+elif [[ -z "${OPENCODE_MCP_ORCHESTRATOR_RELEASE_BASE:-}" ]]; then
+  die "refusing non-HTTPS release URL"
+fi
+
+curl "${CURL_ARGS[@]}" \
+  "$RELEASE_BASE/SHA256SUMS" \
+  -o "$TMP/SHA256SUMS"
+
+ARCHIVES="$(
+  awk '
+    $2 ~ /^opencode-mcp-orchestrator-[0-9][0-9A-Za-z.+-]*\.tar\.gz$/ {
+      print $2
+    }
+  ' "$TMP/SHA256SUMS"
+)"
+
+ARCHIVE_COUNT="$(
+  printf '%s\n' "$ARCHIVES" \
+    | awk 'NF { count++ } END { print count + 0 }'
+)"
+
+[[ "$ARCHIVE_COUNT" -eq 1 ]] \
+  || die "expected exactly one release archive in SHA256SUMS, found $ARCHIVE_COUNT"
+
+ARCHIVE="$(
+  printf '%s\n' "$ARCHIVES" \
+    | awk 'NF { print; exit }'
+)"
+
+case "$ARCHIVE" in
+  */*|*".."*)
+    die "unsafe archive filename in SHA256SUMS: $ARCHIVE"
+    ;;
+esac
+
+EXPECTED="$(
+  awk -v archive="$ARCHIVE" '
+    $2 == archive {
+      print $1
+      exit
+    }
+  ' "$TMP/SHA256SUMS"
+)"
+
+[[ "$EXPECTED" =~ ^[0-9a-fA-F]{64}$ ]] \
+  || die "invalid SHA-256 value for $ARCHIVE"
+
+echo "Downloading:"
+echo "  $ARCHIVE"
+
+curl "${CURL_ARGS[@]}" \
+  "$RELEASE_BASE/$ARCHIVE" \
+  -o "$TMP/$ARCHIVE"
+
+ACTUAL="$(
+  sha256sum "$TMP/$ARCHIVE" \
+    | awk '{ print $1 }'
+)"
+
+if [[ "${ACTUAL,,}" != "${EXPECTED,,}" ]]; then
+  echo >&2
+  echo "Checksum mismatch." >&2
+  echo "Expected: $EXPECTED" >&2
+  echo "Actual:   $ACTUAL" >&2
+  exit 1
+fi
+
+echo "Checksum verified."
+
+LISTING="$TMP/archive.list"
+
+tar -tzf "$TMP/$ARCHIVE" \
+  > "$LISTING"
+
+while IFS= read -r entry; do
+  [[ -z "$entry" ]] && continue
+
+  case "$entry" in
+    /*)
+      die "unsafe absolute path in release archive: $entry"
+      ;;
+  esac
+
+  case "/$entry/" in
+    */../*)
+      die "unsafe parent traversal in release archive: $entry"
+      ;;
+  esac
+done < "$LISTING"
+
+TOP="$(
+  awk -F/ '
+    NF {
+      print $1
+      exit
+    }
+  ' "$LISTING"
+)"
+
+[[ -n "$TOP" ]] \
+  || die "release archive is empty"
+
+if awk -v top="$TOP" '
+  NF &&
+  $0 != top &&
+  index($0, top "/") != 1 {
+    exit 1
+  }
+' "$LISTING"
+then
+  :
+else
+  die "release archive contains multiple top-level paths"
+fi
+
+EXTRACT="$TMP/extracted"
+
+mkdir -p "$EXTRACT"
+
+tar -xzf "$TMP/$ARCHIVE" \
+  -C "$EXTRACT"
+
+PAYLOAD="$EXTRACT/$TOP"
+
+[[ -f "$PAYLOAD/install.sh" ]] \
+  || die "release archive does not contain install.sh"
+
+echo
+echo "Release verified."
+echo "Starting installer..."
+echo
+
+set +e
+
+bash "$PAYLOAD/install.sh" "$@"
+
+RC=$?
+
+set -e
+
+exit "$RC"

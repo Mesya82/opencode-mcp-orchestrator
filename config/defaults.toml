@@ -1,0 +1,5 @@
+# Public defaults will live here.
+#
+# Model selection is intentionally not defined yet.
+# The installer/configurator will populate user-selected models from
+# the models actually available in the user's OpenCode installation.

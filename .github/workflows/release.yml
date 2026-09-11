@@ -1,0 +1,191 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish release
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Derive release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+
+          if [[ "$TAG" != v* ]]; then
+            echo "Expected v-prefixed tag, got: $TAG" >&2
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([+-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid release version: $VERSION" >&2
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Version: $VERSION"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build runtime bundles
+        run: npm run build
+
+      - name: Verify bundled entrypoints
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          node --check dist/libexec/mcp-server.mjs
+          node --check dist/libexec/configure-models.mjs
+          node --check dist/libexec/configure-integrations.mjs
+          node --check dist/libexec/setup.mjs
+          node --check dist/libexec/install-core.mjs
+          node --check dist/libexec/install-opencode.mjs
+          node --check dist/libexec/install-codex.mjs
+          node --check dist/libexec/install-claude.mjs
+          node --check dist/libexec/doctor.mjs
+          node --check dist/libexec/uninstall.mjs
+
+      - name: Package release
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          rm -rf release
+
+          node scripts/package-release.mjs \
+            --version "$VERSION" \
+            --repository "$GITHUB_REPOSITORY"
+
+      - name: Verify release checksum
+        working-directory: release
+        run: sha256sum -c SHA256SUMS
+
+      - name: Verify release assets
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          ARCHIVE="release/opencode-mcp-orchestrator-${VERSION}.tar.gz"
+
+          test -x release/install.sh
+          test -f release/SHA256SUMS
+          test -f "$ARCHIVE"
+
+          grep -q \
+            "DEFAULT_REPOSITORY=\"$GITHUB_REPOSITORY\"" \
+            release/install.sh
+
+          if tar -tzf "$ARCHIVE" \
+            | grep -E \
+              'node_modules|config\.local\.json|/\.env($|/)'
+          then
+            echo "Development content leaked into release archive" >&2
+            exit 1
+          fi
+
+          TOP="opencode-mcp-orchestrator-${VERSION}"
+
+          tar -tzf "$ARCHIVE" \
+            | grep -qx "${TOP}/install.sh"
+
+          tar -tzf "$ARCHIVE" \
+            | grep -qx "${TOP}/manifest.json"
+
+          echo "RELEASE_ASSETS_VERIFIED"
+
+      - name: Smoke extracted release
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+
+          ARCHIVE="release/opencode-mcp-orchestrator-${VERSION}.tar.gz"
+
+          tar -xzf "$ARCHIVE" \
+            -C "$TMP"
+
+          PAYLOAD="$TMP/opencode-mcp-orchestrator-${VERSION}"
+
+          test -x "$PAYLOAD/install.sh"
+
+          node "$PAYLOAD/libexec/setup.mjs" \
+            --help
+
+          node "$PAYLOAD/libexec/doctor.mjs" \
+            --help
+
+          node "$PAYLOAD/libexec/uninstall.mjs" \
+            --help || true
+
+          node - "$PAYLOAD/manifest.json" "$VERSION" <<'NODE'
+          const fs = require("fs")
+
+          const manifest =
+            JSON.parse(
+              fs.readFileSync(
+                process.argv[2],
+                "utf8",
+              ),
+            )
+
+          const expected =
+            process.argv[3]
+
+          if (manifest.version !== expected) {
+            throw new Error(
+              `manifest version ${manifest.version} != ${expected}`,
+            )
+          }
+
+          console.log(
+            "EXTRACTED_RELEASE_MANIFEST_OK",
+          )
+          NODE
+
+      - name: Publish GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          gh release create "$GITHUB_REF_NAME" \
+            "release/install.sh" \
+            "release/opencode-mcp-orchestrator-${VERSION}.tar.gz" \
+            "release/SHA256SUMS" \
+            --verify-tag \
+            --title "OpenCode MCP Orchestrator ${VERSION}" \
+            --generate-notes
