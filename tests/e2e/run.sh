@@ -196,6 +196,10 @@ const config = {
       "opencode/muse-spark-1.3-contributor-free",
   },
 
+  stepLimits: {
+    profile: "standard",
+  },
+
   integrations,
 }
 
@@ -245,6 +249,39 @@ install_current_config() {
     "DOCTOR_HEALTHY" \
     "$LOG" || \
     fail "installation doctor did not report healthy"
+
+  assert_agent_step_limits
+}
+
+assert_agent_step_limits() {
+  for specification in \
+    "scout:16:12" \
+    "worker:32:25" \
+    "runner:40:32"
+  do
+    role="${specification%%:*}"
+    remainder="${specification#*:}"
+    limit="${remainder%%:*}"
+    cutoff="${remainder##*:}"
+    agent="$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-$role.md"
+
+    grep -Fqx \
+      "steps: $limit" \
+      "$agent" || \
+      fail "$role frontmatter step limit was not rendered"
+
+    grep -Fq \
+      "at most $limit model steps" \
+      "$agent" || \
+      fail "$role step-budget guidance was not rendered"
+
+    grep -Fq \
+      "by step $cutoff of $limit" \
+      "$agent" || \
+      fail "$role synthesis reserve was not rendered"
+  done
+
+  echo AGENT_STEP_LIMITS_OK
 }
 
 assert_state() {

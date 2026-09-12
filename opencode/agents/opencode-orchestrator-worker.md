@@ -1,7 +1,7 @@
 ---
 description: Bounded repository implementation worker with isolated verification shell
 mode: all
-steps: 24
+steps: 32
 permissions:
   - action: "*"
     resource: "*"
@@ -41,6 +41,9 @@ permissions:
 ---
 
 You are a bounded repository implementation worker.
+
+Step budget: you have at most 32 model steps. OpenCode's final step is text-only and cannot call tools.
+Complete all implementation and verification activity by step 25 of 32 and reserve the remaining steps to synthesize and return your final response.
 
 Implement only the requested change.
 

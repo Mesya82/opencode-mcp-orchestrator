@@ -97,11 +97,11 @@ The interactive installer then:
 2. detects and removes an existing project-owned installation, if present,
    while preserving user configuration
 3. installs the requested release as a fresh core payload
-4. installs the OpenCode agents and sandbox plugin
-5. discovers models available through OpenCode
-6. lets the user choose models using an interactive searchable selector
-7. detects supported parent coding clients
-8. lets the user select integrations
+4. discovers models available through OpenCode
+5. lets the user choose models and a step-limit profile
+6. detects supported parent coding clients
+7. lets the user select integrations
+8. renders and installs the OpenCode agents plus sandbox plugin
 9. installs MCP and skill integrations for the requested configuration
 10. runs the installation doctor
 
@@ -125,10 +125,48 @@ Example:
         "worker": "provider/model-b",
         "runner": "provider/model-c"
       },
+      "stepLimits": {
+        "profile": "standard"
+      },
       "integrations": [
         "codex",
         "claude"
       ]
+    }
+
+## Step-limit profiles
+
+The installer configures the maximum number of model steps available to each
+delegated role. A model step is one agent iteration and may contain several
+parallel tool calls.
+
+Three profiles are available:
+
+| Profile | Scout | Worker | Runner | Intended use |
+| --- | ---: | ---: | ---: | --- |
+| Standard | 16 | 32 | 40 | Raised defaults for normal focused delegation |
+| Extended | 32 | 48 | 64 | Broad investigations and tool-heavy models such as Muse |
+| Custom | User-selected | User-selected | User-selected | Explicit per-role control from 4 through 256 steps |
+
+Each generated agent prompt states its actual limit and reserves the final 20%
+of the budget, with a minimum of two steps, for synthesis. OpenCode's final
+configured step is text-only, so the reserve reduces the chance that a model
+reaches provider-incompatible forced termination without returning a report.
+
+Configurations created by older releases do not need manual migration. If
+`stepLimits` is absent, setup uses the new Standard profile. Running the
+installer again lets interactive users select another profile and regenerates
+the managed OpenCode agent definitions from that setting.
+
+A non-interactive custom configuration uses:
+
+    {
+      "stepLimits": {
+        "profile": "custom",
+        "scout": 24,
+        "worker": 40,
+        "runner": 48
+      }
     }
 
 ## Installed layout
@@ -308,6 +346,8 @@ The doctor checks:
 - runtime prerequisites
 - installed core files
 - configured role models
+- the step-limit profile and per-role values
+- installed agent definitions match the configured limits
 - OpenCode agents/plugin
 - selected Codex integration
 - selected Claude Code integration
@@ -336,7 +376,10 @@ Files modified by the user are preserved.
 Development requires Node.js and npm.
 
     npm ci
-    npm run build
+    npm test
+
+`npm test` builds the release payload and runs the unit and installer
+integration suites. The CI workflow uses this as its focused test gate.
 
 Create a local release:
 
@@ -357,7 +400,8 @@ Run the clean-container E2E suite with:
 
     npm run test:e2e
 
-The suite builds a release artifact, starts a clean Linux container, installs
+The suite first runs the same focused tests as CI, builds a release artifact,
+starts a clean Linux container, installs
 the latest Codex CLI, Claude Code, and OpenCode, and exercises the real
 curl-based bootstrap installer.
 
@@ -370,6 +414,7 @@ It verifies:
 - real Codex and Claude Code MCP registrations
 - MCP `initialize` and `tools/list`
 - the `scout`, `worker`, and `runner` tool contract
+- configured step limits are rendered into installed agent definitions
 - installation doctor health
 - uninstall cleanup
 - preservation of user configuration
@@ -378,7 +423,18 @@ Docker or Podman may be used locally. The GitHub E2E workflow also runs daily so
 changes in the latest supported client CLIs can surface even when this repository
 has not changed.
 
-Release publication runs the same clean-container E2E suite as a mandatory gate.
+The scheduled E2E workflow and release publication both run this entrypoint, so
+the focused and clean-container suites are mandatory in all pipelines.
+
+To exercise the built MCP server against the currently configured live Scout
+model and existing OpenCode authentication, run:
+
+    npm run build
+    npm run test:live:scout
+
+This sends a real provider request and may incur provider usage. Install the
+same configuration first so the managed agent definition and its configured
+step limit match the values read by the live test.
 
 ## Releases
 

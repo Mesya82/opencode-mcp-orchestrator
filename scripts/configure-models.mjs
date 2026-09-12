@@ -21,8 +21,19 @@ import { spawnSync } from "node:child_process"
 
 import {
   confirm,
+  input,
   search,
+  select,
 } from "@inquirer/prompts"
+
+import {
+  MAX_STEP_LIMIT,
+  MIN_STEP_LIMIT,
+  normalizeStepLimits,
+  STEP_LIMIT_PROFILES,
+  STEP_LIMIT_ROLES,
+  stepLimitConfig,
+} from "../config/step-limits.mjs"
 
 function parseArgs(argv) {
   const result = {
@@ -56,6 +67,9 @@ Interactively select the OpenCode model used for:
 
 Available choices are discovered from the user's current OpenCode
 installation. No provider or model list is maintained by this project.
+
+The configurator also selects Standard, Extended, or Custom model-step
+limits for the delegated roles.
 `)
       process.exit(0)
     }
@@ -542,6 +556,76 @@ if (useOne) {
     })
 }
 
+const currentStepLimits =
+  normalizeStepLimits(
+    config.stepLimits,
+  )
+
+const stepProfile =
+  await select({
+    message: "Select delegated-agent step-limit profile",
+    default: currentStepLimits.profile,
+    choices: [
+      {
+        name:
+          `Standard — Scout ${STEP_LIMIT_PROFILES.standard.scout}, Worker ${STEP_LIMIT_PROFILES.standard.worker}, Runner ${STEP_LIMIT_PROFILES.standard.runner}`,
+        value: "standard",
+        description:
+          "Raised defaults for typical focused delegation.",
+      },
+      {
+        name:
+          `Extended — Scout ${STEP_LIMIT_PROFILES.extended.scout}, Worker ${STEP_LIMIT_PROFILES.extended.worker}, Runner ${STEP_LIMIT_PROFILES.extended.runner}`,
+        value: "extended",
+        description:
+          "More room for tool-heavy models and broad investigations.",
+      },
+      {
+        name: "Custom — configure each role",
+        value: "custom",
+        description:
+          "Set an explicit model-step limit for Scout, Worker, and Runner.",
+      },
+    ],
+  })
+
+let customLimits
+
+if (stepProfile === "custom") {
+  customLimits = {}
+
+  for (const role of STEP_LIMIT_ROLES) {
+    const fallback =
+      currentStepLimits.limits[role] ??
+      STEP_LIMIT_PROFILES.standard[role]
+
+    const answer =
+      await input({
+        message: `Model-step limit for ${role}`,
+        default: String(fallback),
+        validate: (value) => {
+          const parsed = Number(value)
+
+          return (
+            Number.isInteger(parsed) &&
+            parsed >= MIN_STEP_LIMIT &&
+            parsed <= MAX_STEP_LIMIT
+          )
+            ? true
+            : `Enter an integer from ${MIN_STEP_LIMIT} to ${MAX_STEP_LIMIT}`
+        },
+      })
+
+    customLimits[role] = Number(answer)
+  }
+}
+
+config.stepLimits =
+  stepLimitConfig(
+    stepProfile,
+    customLimits,
+  )
+
 mkdirSync(
   dirname(configPath),
   {
@@ -577,6 +661,22 @@ console.log(
 console.log(
   `Runner  ${config.models.runner}`,
 )
+
+const savedStepLimits =
+  normalizeStepLimits(
+    config.stepLimits,
+  )
+
+console.log()
+console.log(
+  `Step-limit profile: ${savedStepLimits.profile}`,
+)
+
+for (const role of STEP_LIMIT_ROLES) {
+  console.log(
+    `  ${role.padEnd(7)} ${savedStepLimits.limits[role]}`,
+  )
+}
 
 console.log()
 console.log(

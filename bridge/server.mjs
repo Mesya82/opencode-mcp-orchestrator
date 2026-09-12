@@ -7,6 +7,11 @@ import * as z from "zod/v4"
 import { OpenCode } from "@opencode/client"
 import { Service } from "@opencode/client/service"
 
+import {
+  extractFinalText,
+  messageType,
+} from "./final-text.mjs"
+
 let clientPromise
 
 function configPath() {
@@ -119,16 +124,6 @@ async function getClient() {
   return clientPromise
 }
 
-function messageType(message) {
-  return message?.type ?? message?.info?.type
-}
-
-function messageParts(message) {
-  if (Array.isArray(message?.content)) return message.content
-  if (Array.isArray(message?.parts)) return message.parts
-  return []
-}
-
 async function runAgent(directoryArg, task, agent, role) {
   const directory = await realpath(directoryArg)
   const client = await getClient()
@@ -180,29 +175,10 @@ async function runAgent(directoryArg, task, agent, role) {
 
   const last = assistants.at(-1)
 
-  if (!last) {
-    throw new Error(
-      `OpenCode ${agent} session ${session.id} produced no assistant result`
-    )
-  }
-
-  const text = messageParts(last)
-    .filter(
-      (part) =>
-        part?.type === "text" &&
-        typeof part.text === "string"
-    )
-    .map((part) => part.text)
-    .join("\n")
-    .trim()
-
-  if (!text) {
-    throw new Error(
-      `OpenCode ${agent} session ${session.id} produced no final text`
-    )
-  }
-
-  return text
+  return extractFinalText(last, {
+    agent,
+    sessionID: session.id,
+  })
 }
 
 function errorResult(name, error) {

@@ -26,7 +26,17 @@ model from user configuration.
 `opencode/agents/`
 
 Agent definitions contain behavior and tool policy, but deliberately contain no
-hardcoded model.
+hardcoded model. Their model-step limits and matching synthesis guidance are
+rendered during installation from the selected settings profile.
+
+### Step-limit settings
+
+`config/step-limits.mjs`
+
+Defines the Standard and Extended presets, validates Custom values, derives the
+tool-activity cutoff that reserves synthesis capacity, and renders those values
+into agent definitions. Older configuration files without step-limit settings
+resolve to Standard.
 
 ### Sandbox plugin
 
@@ -34,11 +44,12 @@ hardcoded model.
 
 Provides the structured sandbox tools required by Worker and Runner.
 
-### Model configurator
+### Model and step-limit configurator
 
 `scripts/configure-models.mjs`
 
-Discovers the user's current OpenCode catalog and stores role selections.
+Discovers the user's current OpenCode catalog, stores role selections, and lets
+the user select Standard, Extended, or per-role Custom step limits.
 
 ### Integration configurator
 
@@ -59,7 +70,9 @@ Installation is split into small components:
 - doctor
 - uninstall
 
-`setup.mjs` composes those pieces.
+`setup.mjs` composes those pieces. Configuration is completed before the
+OpenCode backend is installed so agent definitions can be rendered with the
+selected limits while retaining managed-file ownership checks.
 
 ## Release design
 

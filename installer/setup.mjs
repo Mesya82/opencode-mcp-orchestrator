@@ -20,6 +20,11 @@ import {
   spawnSync,
 } from "node:child_process"
 
+import {
+  normalizeStepLimits,
+  STEP_LIMIT_ROLES,
+} from "../config/step-limits.mjs"
+
 const here =
   dirname(
     fileURLToPath(
@@ -375,21 +380,6 @@ runNodeScript(
   ],
 )
 
-console.log()
-console.log(
-  "Installing OpenCode backend..."
-)
-
-runNodeScript(
-  component(
-    "install-opencode.mjs",
-  ),
-  [
-    "--payload",
-    resolve(args.payload),
-  ],
-)
-
 if (!args.nonInteractive) {
   console.log()
   console.log(
@@ -435,6 +425,11 @@ const config =
     configPath,
   )
 
+const stepLimits =
+  normalizeStepLimits(
+    config.stepLimits,
+  )
+
 for (const role of ["scout", "worker", "runner"]) {
   if (
     typeof config.models?.[role] !== "string" ||
@@ -454,6 +449,24 @@ if (
     "no parent-agent integrations are configured"
   )
 }
+
+console.log()
+console.log(
+  "Installing OpenCode backend..."
+)
+
+runNodeScript(
+  component(
+    "install-opencode.mjs",
+  ),
+  [
+    "--payload",
+    resolve(args.payload),
+
+    "--config",
+    configPath,
+  ],
+)
 
 const integrations =
   new Set(
@@ -540,6 +553,17 @@ for (
 ) {
   console.log(
     `  ${role.padEnd(7)} ${config.models?.[role] ?? "<not configured>"}`,
+  )
+}
+
+console.log()
+console.log(
+  `Step-limit profile: ${stepLimits.profile}`,
+)
+
+for (const role of STEP_LIMIT_ROLES) {
+  console.log(
+    `  ${role.padEnd(7)} ${stepLimits.limits[role]}`,
   )
 }
 

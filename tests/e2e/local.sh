@@ -42,6 +42,7 @@ echo
 echo "=== BUILD RELEASE ==="
 
 npm run build
+npm run test:focused
 
 rm -rf release
 

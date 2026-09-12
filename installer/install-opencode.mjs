@@ -5,7 +5,6 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
-  copyFileSync,
 } from "node:fs"
 
 import {
@@ -17,9 +16,15 @@ import {
   createHash,
 } from "node:crypto"
 
+import {
+  normalizeStepLimits,
+  renderAgentStepLimit,
+} from "../config/step-limits.mjs"
+
 function parseArgs(argv) {
   const result = {
     payload: null,
+    config: null,
   }
 
   for (let i = 0; i < argv.length; i++) {
@@ -30,10 +35,15 @@ function parseArgs(argv) {
       continue
     }
 
+    if (arg === "--config") {
+      result.config = argv[++i]
+      continue
+    }
+
     if (arg === "--help" || arg === "-h") {
       console.log(`
 Usage:
-  install-opencode.mjs --payload PATH
+  install-opencode.mjs --payload PATH [--config PATH]
 `)
       process.exit(0)
     }
@@ -89,9 +99,12 @@ function installManagedFile({
   source,
   destination,
   state,
+  content,
 }) {
   const sourceHash =
-    sha256File(source)
+    createHash("sha256")
+      .update(content)
+      .digest("hex")
 
   const previous =
     state.files[destination]
@@ -133,9 +146,9 @@ function installManagedFile({
         },
       )
 
-      copyFileSync(
-        source,
+      writeFileSync(
         destination,
+        content,
       )
 
       state.files[destination] = {
@@ -168,9 +181,9 @@ function installManagedFile({
     },
   )
 
-  copyFileSync(
-    source,
+  writeFileSync(
     destination,
+    content,
   )
 
   state.files[destination] = {
@@ -212,6 +225,33 @@ const appConfig =
     "opencode-mcp-orchestrator",
   )
 
+const configPath =
+  args.config ||
+  process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG ||
+  resolve(
+    appConfig,
+    "config.json",
+  )
+
+if (!existsSync(configPath)) {
+  throw new Error(
+    `configuration not found: ${configPath}`,
+  )
+}
+
+const config =
+  JSON.parse(
+    readFileSync(
+      configPath,
+      "utf8",
+    ),
+  )
+
+const stepLimits =
+  normalizeStepLimits(
+    config.stepLimits,
+  )
+
 const statePath =
   resolve(
     appConfig,
@@ -229,6 +269,8 @@ const state =
 
 const files = [
   {
+    role: "scout",
+
     source:
       resolve(
         payload,
@@ -243,6 +285,8 @@ const files = [
   },
 
   {
+    role: "worker",
+
     source:
       resolve(
         payload,
@@ -257,6 +301,8 @@ const files = [
   },
 
   {
+    role: "runner",
+
     source:
       resolve(
         payload,
@@ -292,9 +338,26 @@ for (const file of files) {
     )
   }
 
+  const source =
+    readFileSync(
+      file.source,
+    )
+
+  const content =
+    file.role
+      ? Buffer.from(
+          renderAgentStepLimit(
+            source.toString("utf8"),
+            file.role,
+            stepLimits.limits[file.role],
+          ),
+        )
+      : source
+
   installManagedFile({
     ...file,
     state,
+    content,
   })
 }
 
@@ -325,6 +388,10 @@ console.log(
 
 console.log(
   `Ownership state: ${statePath}`,
+)
+
+console.log(
+  `Step-limit profile: ${stepLimits.profile}`,
 )
 
 console.log()

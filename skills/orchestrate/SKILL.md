@@ -33,6 +33,26 @@ Do not use legacy Pi/MCP routes or local Qwen unless the user explicitly asks to
 
 Do not invoke the delegated model through raw child Codex sessions.
 
+## Delegated step budgets
+
+Each delegated role has an installer-configured maximum number of OpenCode model steps:
+
+| Profile | Scout | Worker | Runner |
+| --- | ---: | ---: | ---: |
+| Standard | 16 | 32 | 40 |
+| Extended | 32 | 48 | 64 |
+| Custom | 4-256 | 4-256 | 4-256 |
+
+Standard is the fallback for configurations created before step-limit profiles existed. Do not assume that Standard is the active profile when installation context says otherwise.
+
+These are model-step limits, not tool-call limits. One model step can contain multiple parallel tool calls. The installed agent definition tells the delegated model its exact limit and reserves the final 20 percent, with a minimum of two steps, for synthesis without further tool use.
+
+Scope every delegated task so it can finish within the role's budget. Standard is intended for focused tasks. Extended is appropriate for broad repository reviews or tool-intensive models such as Muse. Use Custom only when the user has deliberately selected role-specific limits.
+
+Do not put a guessed step count in a task packet. If the active value is known, it may be stated consistently; otherwise rely on the installed agent definition, which contains the actual configured limit.
+
+If a delegated result reports budget exhaustion or a final-step provider error, treat it as an infrastructure failure and report the concrete error. One retry is allowed only when the task packet is made materially narrower so that the cause has been addressed. Do not repeat the same broad prompt, silently raise limits, or silently change the model. If the narrower retry still fails, recommend selecting Extended or suitable Custom limits through setup and stop.
+
 ## Routing
 
 ### Sol directly

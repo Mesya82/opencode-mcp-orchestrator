@@ -8,6 +8,11 @@
     "build": "node scripts/build-release.mjs",
     "configure": "node scripts/configure-models.mjs",
     "package:release": "node scripts/package-release.mjs",
+    "test": "npm run build && npm run test:focused",
+    "test:focused": "npm run test:unit && npm run test:integration",
+    "test:unit": "node --test tests/unit/*.test.mjs",
+    "test:integration": "node --test tests/integration/*.test.mjs",
+    "test:live:scout": "node tests/live/mcp-scout-review.mjs dist/libexec/mcp-server.mjs .",
     "test:e2e": "bash tests/e2e/local.sh"
   },
   "dependencies": {

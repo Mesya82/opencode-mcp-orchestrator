@@ -13,6 +13,11 @@ import {
   spawnSync,
 } from "node:child_process"
 
+import {
+  normalizeStepLimits,
+  STEP_LIMIT_ROLES,
+} from "../config/step-limits.mjs"
+
 function parseArgs(argv) {
   const result = {
     config: null,
@@ -185,6 +190,7 @@ for (const relative of [
 }
 
 let config = null
+let stepLimits = null
 
 console.log()
 console.log("Configuration")
@@ -227,16 +233,48 @@ if (config) {
       fail(`${role} model not configured`)
     }
   }
+
+  try {
+    stepLimits =
+      normalizeStepLimits(
+        config.stepLimits,
+      )
+
+    ok(
+      `step-limit profile: ${stepLimits.profile}`,
+    )
+
+    for (const role of STEP_LIMIT_ROLES) {
+      ok(
+        `${role} step limit: ${stepLimits.limits[role]}`,
+      )
+    }
+  } catch (error) {
+    fail(
+      `invalid step-limit configuration: ${error.message}`,
+    )
+  }
 }
 
 console.log()
 console.log("OpenCode backend")
 
-for (const relative of [
-  "agents/opencode-orchestrator-scout.md",
-  "agents/opencode-orchestrator-worker.md",
-  "agents/opencode-orchestrator-runner.md",
-  "plugins/opencode-mcp-orchestrator/index.ts",
+for (const { relative, role } of [
+  {
+    relative: "agents/opencode-orchestrator-scout.md",
+    role: "scout",
+  },
+  {
+    relative: "agents/opencode-orchestrator-worker.md",
+    role: "worker",
+  },
+  {
+    relative: "agents/opencode-orchestrator-runner.md",
+    role: "runner",
+  },
+  {
+    relative: "plugins/opencode-mcp-orchestrator/index.ts",
+  },
 ]) {
   const path =
     resolve(
@@ -247,6 +285,26 @@ for (const relative of [
 
   if (existsSync(path)) {
     ok(relative)
+
+    if (role && stepLimits) {
+      const text =
+        readFileSync(
+          path,
+          "utf8",
+        )
+
+      const limit =
+        stepLimits.limits[role]
+
+      if (
+        text.includes(`steps: ${limit}`) &&
+        text.includes(`at most ${limit} model steps`)
+      ) {
+        ok(`${role} installed step limit matches configuration`)
+      } else {
+        fail(`${role} installed step limit does not match configuration`)
+      }
+    }
   } else {
     fail(`${relative} missing`)
   }
