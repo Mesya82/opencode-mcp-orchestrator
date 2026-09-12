@@ -5,7 +5,6 @@ import {
   existsSync,
   openSync,
   readFileSync,
-  readlinkSync,
 } from "node:fs"
 
 import {
@@ -222,7 +221,7 @@ const requiredComponents = [
   "install-opencode.mjs",
   "install-codex.mjs",
   "install-claude.mjs",
-  "remove-integration.mjs",
+  "uninstall.mjs",
   "configure-models.mjs",
   "configure-integrations.mjs",
   "doctor.mjs",
@@ -333,64 +332,48 @@ const appData =
     "opencode-mcp-orchestrator",
   )
 
-const currentLink =
-  resolve(
-    appData,
-    "current",
-  )
+const replacingExistingInstallation =
+  existsSync(appData)
 
-const requestedVersionDir =
-  resolve(
-    appData,
-    "versions",
-    args.version,
-  )
-
-let currentVersionDir = null
-
-if (existsSync(currentLink)) {
-  try {
-    currentVersionDir =
-      resolve(
-        dirname(currentLink),
-        readlinkSync(currentLink),
-      )
-  } catch {
-    currentVersionDir = null
-  }
-}
-
-const reuseCurrentCore =
-  currentVersionDir === requestedVersionDir
-
-console.log()
-
-if (reuseCurrentCore) {
+if (replacingExistingInstallation) {
+  console.log()
   console.log(
-    "Core payload already active for this version.",
+    "Existing installation detected.",
   )
 
   console.log(
-    "Reusing installed core payload.",
+    "Removing existing installation while preserving configuration...",
   )
-} else {
-  console.log(
-    "Installing core payload..."
-  )
+
+  console.log()
 
   runNodeScript(
     component(
-      "install-core.mjs",
+      "uninstall.mjs",
     ),
     [
-      "--payload",
-      resolve(args.payload),
-
-      "--version",
-      args.version,
+      "--for-update",
     ],
   )
 }
+
+console.log()
+console.log(
+  "Installing core payload...",
+)
+
+runNodeScript(
+  component(
+    "install-core.mjs",
+  ),
+  [
+    "--payload",
+    resolve(args.payload),
+
+    "--version",
+    args.version,
+  ],
+)
 
 console.log()
 console.log(
@@ -477,71 +460,6 @@ const integrations =
     config.integrations ?? [],
   )
 
-const configHome =
-  process.env.XDG_CONFIG_HOME ||
-  resolve(
-    process.env.HOME,
-    ".config",
-  )
-
-const managedStatePath =
-  resolve(
-    configHome,
-    "opencode-mcp-orchestrator/managed-files.json",
-  )
-
-let managedState = {
-  integrations: {},
-}
-
-if (existsSync(managedStatePath)) {
-  managedState =
-    JSON.parse(
-      readFileSync(
-        managedStatePath,
-        "utf8",
-      ),
-    )
-}
-
-const integrationLabels = {
-  codex: "Codex",
-  claude: "Claude Code",
-}
-
-const ownedDeselected =
-  ["codex", "claude"]
-    .filter(
-      (integration) =>
-        managedState.integrations?.[integration]?.mcpName &&
-        !integrations.has(integration),
-    )
-
-if (ownedDeselected.length > 0) {
-  console.log()
-  console.log(
-    "Integration changes:",
-  )
-
-  for (const integration of ownedDeselected) {
-    const label =
-      integrationLabels[integration]
-
-    console.log()
-    console.log(
-      `  NOTE  ${label} integration is currently installed and managed`,
-    )
-
-    console.log(
-      "        by OpenCode MCP Orchestrator.",
-    )
-
-    console.log(
-      "        With the requested configuration, it will be removed.",
-    )
-  }
-}
-
 console.log()
 console.log(
   "Installing selected integrations..."
@@ -577,20 +495,6 @@ if (integrations.has("claude")) {
     [
       "--payload",
       resolve(args.payload),
-    ],
-  )
-}
-
-for (const integration of ownedDeselected) {
-  console.log()
-
-  runNodeScript(
-    component(
-      "remove-integration.mjs",
-    ),
-    [
-      "--integration",
-      integration,
     ],
   )
 }

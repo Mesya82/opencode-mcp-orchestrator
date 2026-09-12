@@ -94,14 +94,15 @@ The bootstrap installer:
 The interactive installer then:
 
 1. checks prerequisites
-2. installs the versioned core payload
-3. installs the OpenCode agents and sandbox plugin
-4. discovers models available through OpenCode
-5. lets the user choose models using an interactive searchable selector
-6. detects supported parent coding clients
-7. lets the user select integrations
-8. reconciles MCP and skill integrations to the requested desired state
-9. warns before removing an integration previously managed by this project
+2. detects and removes an existing project-owned installation, if present,
+   while preserving user configuration
+3. installs the requested release as a fresh core payload
+4. installs the OpenCode agents and sandbox plugin
+5. discovers models available through OpenCode
+6. lets the user choose models using an interactive searchable selector
+7. detects supported parent coding clients
+8. lets the user select integrations
+9. installs MCP and skill integrations for the requested configuration
 10. runs the installation doctor
 
 ## Model selection
@@ -132,20 +133,45 @@ Example:
 
 ## Installed layout
 
-Core release payloads use an XDG data directory:
+The installed release uses an XDG data directory:
 
     ${XDG_DATA_HOME:-~/.local/share}/opencode-mcp-orchestrator/
-    ├── versions/
-    │   ├── 0.1.0/
-    │   └── ...
-    ├── current -> versions/<active-version>
+    ├── current/
+    │   ├── libexec/
+    │   ├── opencode/
+    │   ├── skills/
+    │   └── manifest.json
     └── install-manifest.json
 
-Parent integrations reference the stable `current` path. Upgrades therefore
-install a new version and atomically repoint `current`.
+`current/` is a real directory containing the single installed release payload.
+Parent integrations reference this stable path.
+
+Installing another release replaces the existing project-owned installation
+rather than retaining multiple local versions.
 
 User configuration lives separately under the XDG config directory and is
-preserved across upgrades.
+preserved across replacement installs.
+
+## Updating or installing another version
+
+Run the normal installer again to install the latest release:
+
+    curl -fsSL https://github.com/Mesya82/opencode-mcp-orchestrator/releases/latest/download/install.sh | bash
+
+The requested release is downloaded, checksum-verified, validated, and
+extracted before the existing installation is changed.
+
+If an installation already exists, its project-owned payload and integrations
+are removed while user configuration is preserved. The requested release is
+then installed fresh.
+
+The same mechanism can install an older release. For example:
+
+    curl -fsSL https://github.com/Mesya82/opencode-mcp-orchestrator/releases/download/v0.1.2/install.sh | bash
+
+There is no local version archive or version manager. GitHub Releases provide
+the version archive, and running a release's installer makes that release the
+single locally installed version.
 
 ## OpenCode integration
 
@@ -260,12 +286,16 @@ See SECURITY.md for the threat model and limitations.
 
 The installer records hashes of files it owns.
 
-During updates, a managed file is replaced only if it still matches the
-previously installed version.
+During replacement cleanup, a managed file is removed only if it still matches
+the hash recorded by the existing installation.
 
-During uninstall, modified files are preserved rather than deleted.
+Locally modified files are preserved rather than deleted. A subsequent fresh
+installation will not silently overwrite such preserved files.
 
-This prevents an upgrade or uninstall from silently destroying local edits.
+The same conservative behavior applies to normal uninstall.
+
+This prevents replacement installation or uninstall from silently destroying
+local edits.
 
 ## Doctor
 
@@ -334,9 +364,9 @@ curl-based bootstrap installer.
 It verifies:
 
 - Codex-only installation
-- desired-state transition from Codex to Claude Code
+- clean replacement from Codex to Claude Code
 - transition from Claude Code to both integrations
-- same-version reinstall idempotency
+- same-release clean replacement reinstall
 - real Codex and Claude Code MCP registrations
 - MCP `initialize` and `tools/list`
 - the `scout`, `worker`, and `runner` tool contract
@@ -377,10 +407,10 @@ The current implementation has been exercised against:
 - Codex MCP integration
 - Claude Code user-scoped MCP integration
 - clean installation
-- upgrade across two installed versions
+- migration from the public v0.1.2 versioned layout to the single-install layout
 - conservative uninstall behavior
 - checksum-verified bootstrap installation
 - clean-container E2E with real latest Codex CLI, Claude Code, and OpenCode
-- desired-state integration reconfiguration and same-version reinstall
+- integration selection changes across clean replacement installs
 
 The project is still pre-1.0. Interfaces and installation details may evolve.

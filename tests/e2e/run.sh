@@ -365,6 +365,25 @@ probe_mcp() {
     "$SERVER"
 }
 
+assert_single_install_layout() {
+  test -d "$APP_DATA/current" || \
+    fail "current install directory missing"
+
+  test ! -L "$APP_DATA/current" || \
+    fail "current must be a real directory, not a symlink"
+
+  test ! -e "$APP_DATA/versions" || \
+    fail "legacy versions directory exists"
+
+  test -f "$SERVER" || \
+    fail "installed MCP server missing"
+
+  test -f "$APP_DATA/install-manifest.json" || \
+    fail "install manifest missing"
+
+  echo SINGLE_INSTALL_LAYOUT_OK
+}
+
 echo
 echo "========================================"
 echo "STAGE 1: CODEX ONLY"
@@ -376,6 +395,7 @@ write_config \
 install_current_config \
   codex-only
 
+assert_single_install_layout
 assert_codex_present
 assert_claude_absent
 assert_state \
@@ -396,15 +416,17 @@ write_config \
 install_current_config \
   claude-only
 
-grep -Fq \
-  "Codex integration is currently installed and managed" \
-  "$LAST_LOG" || \
-  fail "Codex removal notice missing"
+assert_single_install_layout
 
 grep -Fq \
-  "With the requested configuration, it will be removed." \
+  "Existing installation detected." \
   "$LAST_LOG" || \
-  fail "desired-state removal explanation missing"
+  fail "replacement installation detection missing"
+
+grep -Fq \
+  "UNINSTALL_FOR_UPDATE_COMPLETE" \
+  "$LAST_LOG" || \
+  fail "replacement cleanup marker missing"
 
 assert_codex_absent
 assert_claude_present
@@ -427,6 +449,7 @@ write_config \
 install_current_config \
   both
 
+assert_single_install_layout
 assert_codex_present
 assert_claude_present
 assert_state \
@@ -438,7 +461,7 @@ echo STAGE_3_BOTH_PASS
 
 echo
 echo "========================================"
-echo "STAGE 4: BOTH AGAIN"
+echo "STAGE 4: BOTH AGAIN / CLEAN REPLACEMENT"
 echo "========================================"
 
 write_config \
@@ -448,10 +471,17 @@ write_config \
 install_current_config \
   both-again
 
+assert_single_install_layout
+
 grep -Fq \
-  "Core payload already active for this version." \
+  "Existing installation detected." \
   "$LAST_LOG" || \
-  fail "same-version core reuse was not exercised"
+  fail "same-release replacement detection missing"
+
+grep -Fq \
+  "UNINSTALL_FOR_UPDATE_COMPLETE" \
+  "$LAST_LOG" || \
+  fail "same-release replacement cleanup missing"
 
 assert_codex_present
 assert_claude_present
@@ -460,7 +490,7 @@ assert_state \
 
 probe_mcp
 
-echo STAGE_4_IDEMPOTENT_PASS
+echo STAGE_4_REPLACEMENT_REINSTALL_PASS
 
 echo
 echo "========================================"
@@ -510,6 +540,122 @@ echo CONFIG_PRESERVED
 
 echo
 echo "========================================"
+echo "LEGACY v0.1.2 -> CURRENT RELEASE MIGRATION"
+echo "========================================"
+
+LEGACY_BASE="https://github.com/Mesya82/opencode-mcp-orchestrator/releases/download/v0.1.2"
+LEGACY_INSTALLER="/tmp/opencode-orchestrator-legacy-v0.1.2.sh"
+
+curl -fsSL \
+  "$LEGACY_BASE/install.sh" \
+  -o "$LEGACY_INSTALLER"
+
+chmod +x \
+  "$LEGACY_INSTALLER"
+
+CONFIG_BEFORE_LEGACY_MIGRATION="$(
+  cat "$CONFIG"
+)"
+
+OPENCODE_MCP_ORCHESTRATOR_RELEASE_BASE="$LEGACY_BASE" \
+  "$LEGACY_INSTALLER" \
+    --config "$CONFIG" \
+    --non-interactive
+
+test -L "$APP_DATA/current" || \
+  fail "legacy v0.1.2 current path is not a symlink"
+
+test "$(
+  readlink "$APP_DATA/current"
+)" = "versions/0.1.2" || \
+  fail "unexpected legacy v0.1.2 current target"
+
+test -d "$APP_DATA/versions/0.1.2" || \
+  fail "legacy v0.1.2 payload directory missing"
+
+assert_codex_present
+assert_claude_present
+assert_state \
+  "claude,codex"
+
+probe_mcp
+
+echo LEGACY_V0_1_2_INSTALL_PROVEN
+
+echo
+echo "Migrating legacy v0.1.2 installation to candidate release..."
+
+install_current_config \
+  legacy-migration
+
+assert_single_install_layout
+
+test ! -e "$APP_DATA/versions" || \
+  fail "legacy versions directory survived migration"
+
+assert_codex_present
+assert_claude_present
+assert_state \
+  "claude,codex"
+
+probe_mcp
+
+CONFIG_AFTER_LEGACY_MIGRATION="$(
+  cat "$CONFIG"
+)"
+
+test \
+  "$CONFIG_BEFORE_LEGACY_MIGRATION" = "$CONFIG_AFTER_LEGACY_MIGRATION" || \
+  fail "configuration changed during legacy migration"
+
+grep -Fq \
+  "Existing installation detected." \
+  "$LAST_LOG" || \
+  fail "legacy migration did not detect existing installation"
+
+grep -Fq \
+  "UNINSTALL_FOR_UPDATE_COMPLETE" \
+  "$LAST_LOG" || \
+  fail "legacy migration did not perform replacement cleanup"
+
+echo LEGACY_V0_1_2_TO_SINGLE_INSTALL_PROVEN
+
+echo
+echo "========================================"
+echo "FINAL UNINSTALL AFTER LEGACY MIGRATION"
+echo "========================================"
+
+CONFIG_BEFORE_FINAL_UNINSTALL="$(
+  cat "$CONFIG"
+)"
+
+node \
+  "$APP_DATA/current/libexec/uninstall.mjs"
+
+assert_codex_absent
+assert_claude_absent
+
+test ! -e "$APP_DATA" || \
+  fail "application payload remains after final uninstall"
+
+test ! -e "$STATE" || \
+  fail "managed ownership state remains after final uninstall"
+
+test -f "$CONFIG" || \
+  fail "configuration should remain after final uninstall"
+
+CONFIG_AFTER_FINAL_UNINSTALL="$(
+  cat "$CONFIG"
+)"
+
+test \
+  "$CONFIG_BEFORE_FINAL_UNINSTALL" = "$CONFIG_AFTER_FINAL_UNINSTALL" || \
+  fail "configuration changed during final uninstall"
+
+echo FINAL_LEGACY_MIGRATION_CLEANUP_OK
+
+echo
+echo "========================================"
 echo "E2E PASS"
 echo "========================================"
 echo
@@ -521,9 +667,10 @@ echo
 echo "Verified:"
 echo "  curl-based install"
 echo "  Codex only"
-echo "  Codex -> Claude desired-state transition"
+echo "  Codex -> Claude clean replacement"
 echo "  Claude -> Both transition"
-echo "  same-version Both -> Both idempotency"
+echo "  same-release Both -> Both clean replacement"
+echo "  public v0.1.2 -> single-install migration"
 echo "  real Codex MCP registration"
 echo "  real Claude MCP registration"
 echo "  MCP initialize + tools/list"

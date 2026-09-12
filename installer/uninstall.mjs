@@ -23,10 +23,47 @@ import {
 } from "node:child_process"
 
 function parseArgs(argv) {
-  return {
-    purgeConfig:
-      argv.includes("--purge-config"),
+  const result = {
+    purgeConfig: false,
+    forUpdate: false,
   }
+
+  for (const arg of argv) {
+    if (arg === "--purge-config") {
+      result.purgeConfig = true
+      continue
+    }
+
+    if (arg === "--for-update") {
+      result.forUpdate = true
+      continue
+    }
+
+    if (arg === "--help" || arg === "-h") {
+      console.log(`
+Usage:
+  uninstall.mjs [--purge-config]
+  uninstall.mjs --for-update
+
+--for-update removes the installed payload and project-owned integrations
+while preserving user configuration for the replacement installation.
+`)
+      process.exit(0)
+    }
+
+    throw new Error(`unknown argument: ${arg}`)
+  }
+
+  if (
+    result.purgeConfig &&
+    result.forUpdate
+  ) {
+    throw new Error(
+      "--purge-config cannot be combined with --for-update",
+    )
+  }
+
+  return result
 }
 
 function sha256(path) {
@@ -139,13 +176,46 @@ if (existsSync(statePath)) {
 
 console.log()
 console.log(
-  "OpenCode MCP Orchestrator uninstall",
+  args.forUpdate
+    ? "OpenCode MCP Orchestrator replacement cleanup"
+    : "OpenCode MCP Orchestrator uninstall",
 )
 console.log()
 
 console.log(
   "Removing owned MCP registrations...",
 )
+
+/*
+ * Replacement cleanup must not discard ownership state if an MCP
+ * registration cannot be removed.
+ *
+ * Preflight every client we know we own before making any changes.
+ */
+if (args.forUpdate) {
+  const requiredClients = [
+    ["codex", "Codex", "codex"],
+    ["claude", "Claude Code", "claude"],
+  ]
+
+  for (
+    const [
+      integration,
+      label,
+      command,
+    ]
+    of requiredClients
+  ) {
+    if (
+      state.integrations?.[integration]?.mcpName &&
+      !commandExists(command)
+    ) {
+      throw new Error(
+        `${label} CLI is required to remove the existing managed MCP registration before replacement`,
+      )
+    }
+  }
+}
 
 /*
  * Only touch registrations recorded as owned by this installation.
@@ -181,8 +251,15 @@ if (
       `  REMOVED  Codex MCP ${name}`,
     )
   } else {
+    const message =
+      `could not remove Codex MCP ${name}`
+
+    if (args.forUpdate) {
+      throw new Error(message)
+    }
+
     console.log(
-      `  WARNING  could not remove Codex MCP ${name}`,
+      `  WARNING  ${message}`,
     )
   }
 }
@@ -221,8 +298,15 @@ if (
       `  REMOVED  Claude MCP ${name}`,
     )
   } else {
+    const message =
+      `could not remove Claude MCP ${name}`
+
+    if (args.forUpdate) {
+      throw new Error(message)
+    }
+
     console.log(
-      `  WARNING  could not remove Claude MCP ${name}`,
+      `  WARNING  ${message}`,
     )
   }
 }
@@ -383,5 +467,11 @@ if (preserved > 0) {
 } else {
   console.log(
     "UNINSTALL_COMPLETE",
+  )
+}
+
+if (args.forUpdate) {
+  console.log(
+    "UNINSTALL_FOR_UPDATE_COMPLETE",
   )
 }

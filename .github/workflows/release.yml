@@ -73,7 +73,6 @@ jobs:
           node --check dist/libexec/install-opencode.mjs
           node --check dist/libexec/install-codex.mjs
           node --check dist/libexec/install-claude.mjs
-          node --check dist/libexec/remove-integration.mjs
           node --check dist/libexec/doctor.mjs
           node --check dist/libexec/uninstall.mjs
 

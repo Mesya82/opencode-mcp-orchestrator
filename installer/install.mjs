@@ -8,13 +8,10 @@ import {
   realpathSync,
   renameSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs"
 
 import {
-  dirname,
-  relative,
   resolve,
 } from "node:path"
 
@@ -135,14 +132,13 @@ const sourceManifest =
 const paths =
   environmentPaths()
 
-const versionDir =
-  resolve(
-    paths.appData,
-    "versions",
-    args.version,
-  )
-
-const currentLink =
+/*
+ * Only one release payload is installed locally.
+ *
+ * "current" remains the stable path used by parent integrations, but it is
+ * now a real directory rather than a symlink into versions/<version>.
+ */
+const installDir =
   resolve(
     paths.appData,
     "current",
@@ -158,7 +154,7 @@ console.log("OpenCode MCP Orchestrator")
 console.log()
 console.log(`Version: ${args.version}`)
 console.log(`Payload: ${payload}`)
-console.log(`Install: ${versionDir}`)
+console.log(`Install: ${installDir}`)
 console.log(`Config:  ${paths.appConfig}`)
 console.log()
 
@@ -168,10 +164,7 @@ if (args.dryRun) {
 }
 
 mkdirSync(
-  resolve(
-    paths.appData,
-    "versions",
-  ),
+  paths.appData,
   {
     recursive: true,
     mode: 0o755,
@@ -186,47 +179,56 @@ mkdirSync(
   },
 )
 
-if (existsSync(versionDir)) {
+/*
+ * The higher-level setup flow is responsible for removing an existing
+ * installation before invoking the core installer.
+ *
+ * Refuse to overwrite one here so a direct low-level invocation can never
+ * silently mix two releases.
+ */
+if (existsSync(installDir)) {
   throw new Error(
-    `version already installed: ${versionDir}`,
+    `installation already exists: ${installDir}`,
   )
 }
 
-copyTree(
-  payload,
-  versionDir,
-)
-
 /*
- * current is the stable path used by client integrations.
- *
- * Build the replacement beside current and then rename it over the
- * existing symlink. On Linux/POSIX this keeps the version switch atomic:
- * readers see either the old target or the new target, never a gap.
+ * Copy into a temporary sibling first. A failed copy therefore never leaves
+ * a partially populated stable "current" directory.
  */
-const nextCurrentLink =
-  `${currentLink}.next-${process.pid}`
+const nextInstallDir =
+  resolve(
+    paths.appData,
+    `.current.next-${process.pid}`,
+  )
 
 rmSync(
-  nextCurrentLink,
+  nextInstallDir,
   {
     recursive: true,
     force: true,
   },
 )
 
-symlinkSync(
-  relative(
-    dirname(currentLink),
-    versionDir,
-  ),
-  nextCurrentLink,
-)
+try {
+  copyTree(
+    payload,
+    nextInstallDir,
+  )
 
-renameSync(
-  nextCurrentLink,
-  currentLink,
-)
+  renameSync(
+    nextInstallDir,
+    installDir,
+  )
+} finally {
+  rmSync(
+    nextInstallDir,
+    {
+      recursive: true,
+      force: true,
+    },
+  )
+}
 
 /*
  * Do not overwrite an existing user model configuration.
@@ -264,7 +266,7 @@ const installedManifest = {
     args.version,
 
   current:
-    currentLink,
+    installDir,
 
   config:
     userConfig,
@@ -287,7 +289,7 @@ writeFileSync(
 
 console.log("Core payload installed.")
 console.log()
-console.log(`Current: ${currentLink}`)
+console.log(`Current: ${installDir}`)
 console.log(`Config:  ${userConfig}`)
 console.log()
 console.log("CORE_INSTALL_COMPLETE")

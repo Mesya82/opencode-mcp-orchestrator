@@ -52,11 +52,10 @@ Detects supported parent clients and lets the user choose integrations.
 
 Installation is split into small components:
 
-- core version installation
+- core payload installation
 - OpenCode backend
 - Codex adapter
 - Claude Code adapter
-- integration removal/reconciliation
 - doctor
 - uninstall
 
@@ -75,41 +74,44 @@ The GitHub release consists of:
 - versioned `.tar.gz`
 - `SHA256SUMS`
 
-## Upgrade design
+## Replacement-install design
 
-Every installed release receives its own version directory.
+Only one release payload is installed locally at a time:
 
-A relative symlink:
+    ${XDG_DATA_HOME:-~/.local/share}/opencode-mcp-orchestrator/current/
 
-    current -> versions/<version>
+`current/` is a real directory and remains the stable path referenced by parent
+client integrations.
 
-selects the active version.
+The bootstrap downloads, checksum-verifies, validates, and extracts the
+requested release before the existing installation is changed.
 
-A new version is copied completely before an atomic symlink replacement.
+When an installation already exists, setup removes the project-owned payload
+and integrations while preserving user configuration. It then installs the
+requested release fresh into `current/` and reconstructs the configured
+integrations.
 
-Previous versions are retained so rollback support can be added without
-redownloading the old release.
+The same mechanism is used for upgrades, same-release reinstalls, and
+installing an older release. Previous release payloads are not retained
+locally.
 
 ## Integration ownership
 
 Files managed outside the core data directory are recorded with SHA-256 hashes.
 
-An update may replace a managed file only when its current hash still equals
-the hash previously installed by this project.
+During replacement cleanup or uninstall, an owned file is removed only when
+its current hash still equals the hash recorded by this project.
 
-This deliberately favors preserving user data over forcing an upgrade.
+Locally modified files are preserved rather than deleted. A subsequent fresh
+installation does not silently overwrite preserved unmanaged or modified files.
 
-Integration selection uses desired-state semantics. `setup.mjs` compares the
-requested integrations with the integrations recorded as owned in
-`managed-files.json`. Selected integrations are installed or refreshed;
-owned-but-deselected integrations are announced and then removed through the
-dedicated integration remover.
+This deliberately favors preserving user data over forcing a replacement.
 
-The remover only operates on MCP registrations recorded as owned by this
-project. Managed skill files are deleted only when their hash still matches the
-installed hash; locally modified copies are preserved and released from project
-ownership.
+Integration selection describes the desired integrations for the newly
+installed release. During a replacement install, currently owned integrations
+are removed as part of replacement cleanup and the selected integrations are
+then installed fresh from the requested release.
 
-Re-running setup for the already-active version reuses the existing versioned
-core payload and performs backend/integration reconciliation. Direct duplicate
-core installation remains rejected by the low-level core installer.
+The low-level core installer refuses to overwrite an existing `current/`
+payload. The higher-level setup flow is responsible for replacement cleanup
+before invoking the core installer.

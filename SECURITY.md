@@ -102,14 +102,14 @@ The bootstrap also rejects:
 - `..` parent traversal
 - archives with unexpected multiple top-level roots
 
-Managed integration files are tracked by hash. Upgrades refuse to overwrite
-unmanaged or locally modified files, and uninstall preserves modified files.
+Managed integration files are tracked by hash. Replacement cleanup and
+uninstall preserve locally modified files, and a fresh installation does not
+silently overwrite preserved unmanaged files.
 
-Integration reconfiguration is ownership-aware. If a previously managed client
-is deselected, setup removes only the MCP registration recorded as owned by this
-project and its unmodified managed skill. It does not remove the coding client
-itself or unrelated MCP registrations. A locally modified managed skill is
-preserved and released from project ownership.
+Replacement cleanup is ownership-aware. It removes only MCP registrations
+recorded as owned by this project. After cleanup, the integrations selected in
+the preserved or newly configured settings are installed fresh. Unrelated MCP
+registrations are left untouched.
 
 ## Limitations
 

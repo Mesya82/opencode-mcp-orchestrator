@@ -292,7 +292,7 @@ const node =
   process.execPath
 
 /*
- * Use the stable current symlink, never a specific installed version.
+ * Use the stable current path for the installed payload.
  */
 const mcpServer =
   resolve(

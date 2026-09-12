@@ -39,7 +39,6 @@ jobs:
           node --check dist/libexec/configure-models.mjs
           node --check dist/libexec/configure-integrations.mjs
           node --check dist/libexec/setup.mjs
-          node --check dist/libexec/remove-integration.mjs
           node --check dist/libexec/doctor.mjs
           node --check dist/libexec/uninstall.mjs
 
