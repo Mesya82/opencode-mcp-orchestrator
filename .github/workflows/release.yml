@@ -103,9 +103,12 @@ jobs:
             "DEFAULT_REPOSITORY=\"$GITHUB_REPOSITORY\"" \
             release/install.sh
 
-          if tar -tzf "$ARCHIVE" \
-            | grep -E \
-              'node_modules|config\.local\.json|/\.env($|/)'
+          ARCHIVE_LIST="$RUNNER_TEMP/release-archive-list.txt"
+          tar -tzf "$ARCHIVE" > "$ARCHIVE_LIST"
+
+          if grep -E \
+            'node_modules|config\.local\.json|/\.env($|/)' \
+            "$ARCHIVE_LIST"
           then
             echo "Development content leaked into release archive" >&2
             exit 1
@@ -113,11 +116,9 @@ jobs:
 
           TOP="opencode-mcp-orchestrator-${VERSION}"
 
-          tar -tzf "$ARCHIVE" \
-            | grep -qx "${TOP}/install.sh"
+          grep -qx "${TOP}/install.sh" "$ARCHIVE_LIST"
 
-          tar -tzf "$ARCHIVE" \
-            | grep -qx "${TOP}/manifest.json"
+          grep -qx "${TOP}/manifest.json" "$ARCHIVE_LIST"
 
           echo "RELEASE_ASSETS_VERIFIED"
 
