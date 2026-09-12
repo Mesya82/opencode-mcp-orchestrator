@@ -7,7 +7,8 @@
   "scripts": {
     "build": "node scripts/build-release.mjs",
     "configure": "node scripts/configure-models.mjs",
-    "package:release": "node scripts/package-release.mjs"
+    "package:release": "node scripts/package-release.mjs",
+    "test:e2e": "bash tests/e2e/local.sh"
   },
   "dependencies": {
     "@inquirer/prompts": "8.7.2",

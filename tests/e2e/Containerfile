@@ -1,0 +1,35 @@
+FROM node:24-bookworm
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    bubblewrap \
+    ca-certificates \
+    curl \
+    git \
+    jq \
+    python3 \
+    unzip \
+  && rm -rf /var/lib/apt/lists/*
+
+RUN useradd \
+  --create-home \
+  --shell /bin/bash \
+  tester
+
+USER tester
+
+ENV HOME=/home/tester
+
+ENV PATH=/home/tester/.local/bin:/home/tester/.claude/bin:/home/tester/.claude/local/bin:/home/tester/.opencode/bin:/home/tester/bin:${PATH}
+
+WORKDIR /home/tester
+
+COPY --chown=tester:tester \
+  tests/e2e/run.sh \
+  /e2e/run.sh
+
+COPY --chown=tester:tester \
+  tests/e2e/mcp-probe.mjs \
+  /e2e/mcp-probe.mjs
+
+ENTRYPOINT ["/e2e/run.sh"]

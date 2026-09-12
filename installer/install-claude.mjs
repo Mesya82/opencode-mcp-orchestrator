@@ -100,7 +100,7 @@ function findExecutable(name) {
       "/usr/bin/env",
       [
         "bash",
-        "-lc",
+        "-c",
         `command -v ${name}`,
       ],
       {

@@ -78,7 +78,7 @@ dependencies are bundled into the release artifacts.
 
 ## Installation
 
-Once official GitHub releases are configured, installation will use:
+Install the latest GitHub release with:
 
     curl -fsSL https://github.com/Mesya82/opencode-mcp-orchestrator/releases/latest/download/install.sh | bash
 
@@ -100,8 +100,9 @@ The interactive installer then:
 5. lets the user choose models using an interactive searchable selector
 6. detects supported parent coding clients
 7. lets the user select integrations
-8. installs selected MCP and skill integrations
-9. runs the installation doctor
+8. reconciles MCP and skill integrations to the requested desired state
+9. warns before removing an integration previously managed by this project
+10. runs the installation doctor
 
 ## Model selection
 
@@ -176,6 +177,27 @@ The installer:
 - installs the `orchestrate` skill as a personal Claude Code skill
 
 The registration is therefore available across Claude projects.
+
+## Integration desired state
+
+The selected integration set describes the desired resulting state.
+
+On a later setup run:
+
+- selected integrations are installed or refreshed
+- already-selected integrations are safe to reinstall
+- integrations previously managed by this project but now deselected are announced
+  before removal
+- only MCP registrations and skills owned by this project are removed
+- locally modified managed skill files are preserved rather than deleted
+
+For example, changing from Codex + Claude Code to Claude Code only removes this
+project's Codex MCP registration and managed Codex skill. It does not uninstall
+Codex itself or touch unrelated Codex configuration.
+
+Running setup again for the currently active release reuses that release's core
+payload and reconciles the requested integrations instead of failing because the
+version directory already exists.
 
 ## Delegated roles
 
@@ -299,6 +321,35 @@ Generated assets:
     ├── opencode-mcp-orchestrator-0.1.0.tar.gz
     └── SHA256SUMS
 
+## End-to-end testing
+
+Run the clean-container E2E suite with:
+
+    npm run test:e2e
+
+The suite builds a release artifact, starts a clean Linux container, installs
+the latest Codex CLI, Claude Code, and OpenCode, and exercises the real
+curl-based bootstrap installer.
+
+It verifies:
+
+- Codex-only installation
+- desired-state transition from Codex to Claude Code
+- transition from Claude Code to both integrations
+- same-version reinstall idempotency
+- real Codex and Claude Code MCP registrations
+- MCP `initialize` and `tools/list`
+- the `scout`, `worker`, and `runner` tool contract
+- installation doctor health
+- uninstall cleanup
+- preservation of user configuration
+
+Docker or Podman may be used locally. The GitHub E2E workflow also runs daily so
+changes in the latest supported client CLIs can surface even when this repository
+has not changed.
+
+Release publication runs the same clean-container E2E suite as a mandatory gate.
+
 ## Releases
 
 Pushing a version tag such as:
@@ -329,5 +380,7 @@ The current implementation has been exercised against:
 - upgrade across two installed versions
 - conservative uninstall behavior
 - checksum-verified bootstrap installation
+- clean-container E2E with real latest Codex CLI, Claude Code, and OpenCode
+- desired-state integration reconfiguration and same-version reinstall
 
 The project is still pre-1.0. Interfaces and installation details may evolve.

@@ -62,7 +62,7 @@ function findExecutable(name) {
   const result =
     spawnSync(
       "/usr/bin/env",
-      ["bash", "-lc", `command -v ${name}`],
+      ["bash", "-c", `command -v ${name}`],
       {
         encoding: "utf8",
         env: process.env,

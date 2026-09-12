@@ -181,6 +181,7 @@ const installers = [
   ["installer/install-opencode.mjs", "libexec/install-opencode.mjs"],
   ["installer/install-codex.mjs", "libexec/install-codex.mjs"],
   ["installer/install-claude.mjs", "libexec/install-claude.mjs"],
+  ["installer/remove-integration.mjs", "libexec/remove-integration.mjs"],
   ["installer/doctor.mjs", "libexec/doctor.mjs"],
   ["installer/uninstall.mjs", "libexec/uninstall.mjs"],
 ]

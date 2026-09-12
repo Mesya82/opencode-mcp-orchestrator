@@ -105,6 +105,12 @@ The bootstrap also rejects:
 Managed integration files are tracked by hash. Upgrades refuse to overwrite
 unmanaged or locally modified files, and uninstall preserves modified files.
 
+Integration reconfiguration is ownership-aware. If a previously managed client
+is deselected, setup removes only the MCP registration recorded as owned by this
+project and its unmodified managed skill. It does not remove the coding client
+itself or unrelated MCP registrations. A locally modified managed skill is
+preserved and released from project ownership.
+
 ## Limitations
 
 This project does not claim protection against:

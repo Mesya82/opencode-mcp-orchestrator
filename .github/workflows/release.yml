@@ -50,6 +50,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Full clean-container E2E
+        env:
+          E2E_CONTAINER_RUNTIME: docker
+          E2E_VERSION: 0.0.0-release-e2e
+          E2E_REPOSITORY: ${{ github.repository }}
+        run: npm run test:e2e
+
       - name: Build runtime bundles
         run: npm run build
 
@@ -66,6 +73,7 @@ jobs:
           node --check dist/libexec/install-opencode.mjs
           node --check dist/libexec/install-codex.mjs
           node --check dist/libexec/install-claude.mjs
+          node --check dist/libexec/remove-integration.mjs
           node --check dist/libexec/doctor.mjs
           node --check dist/libexec/uninstall.mjs
 

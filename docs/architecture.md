@@ -56,6 +56,7 @@ Installation is split into small components:
 - OpenCode backend
 - Codex adapter
 - Claude Code adapter
+- integration removal/reconciliation
 - doctor
 - uninstall
 
@@ -97,3 +98,18 @@ An update may replace a managed file only when its current hash still equals
 the hash previously installed by this project.
 
 This deliberately favors preserving user data over forcing an upgrade.
+
+Integration selection uses desired-state semantics. `setup.mjs` compares the
+requested integrations with the integrations recorded as owned in
+`managed-files.json`. Selected integrations are installed or refreshed;
+owned-but-deselected integrations are announced and then removed through the
+dedicated integration remover.
+
+The remover only operates on MCP registrations recorded as owned by this
+project. Managed skill files are deleted only when their hash still matches the
+installed hash; locally modified copies are preserved and released from project
+ownership.
+
+Re-running setup for the already-active version reuses the existing versioned
+core payload and performs backend/integration reconciliation. Direct duplicate
+core installation remains rejected by the low-level core installer.
