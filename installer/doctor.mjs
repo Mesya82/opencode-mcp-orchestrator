@@ -19,6 +19,16 @@ import {
 } from "../config/step-limits.mjs"
 
 import {
+  normalizeConfigTimeoutLimits,
+  TIMEOUT_LIMIT_ROLES,
+} from "../config/timeout-limits.mjs"
+
+import {
+  codexConfigPath,
+  readCodexMcpToolTimeout,
+} from "./codex-config.mjs"
+
+import {
   commandExists,
   isProbeTimeoutResult,
   probeTimeoutMessage,
@@ -181,6 +191,7 @@ for (const relative of [
 
 let config = null
 let stepLimits = null
+let timeoutLimits = null
 
 console.log()
 console.log("Configuration")
@@ -242,6 +253,29 @@ if (config) {
   } catch (error) {
     fail(
       `invalid step-limit configuration: ${error.message}`,
+    )
+  }
+
+  try {
+    timeoutLimits =
+      normalizeConfigTimeoutLimits(config)
+
+    ok(
+      `timeout profile: ${timeoutLimits.profile}`,
+    )
+
+    for (const role of TIMEOUT_LIMIT_ROLES) {
+      ok(
+        `${role} operation timeout: ${timeoutLimits.limits[role]}s`,
+      )
+    }
+
+    ok(
+      `parent MCP timeout: ${timeoutLimits.parentTimeoutSeconds}s`,
+    )
+  } catch (error) {
+    fail(
+      `invalid timeout configuration: ${error.message}`,
     )
   }
 }
@@ -345,6 +379,31 @@ for (
           text.includes("opencode-agents")
         ) {
           ok("Codex MCP registration")
+
+          try {
+            const codexConfiguration =
+              readFileSync(
+                codexConfigPath(),
+                "utf8",
+              )
+
+            const actualTimeout =
+              readCodexMcpToolTimeout(
+                codexConfiguration,
+                "opencode-agents",
+              )
+
+            if (
+              timeoutLimits &&
+              actualTimeout === timeoutLimits.parentTimeoutSeconds
+            ) {
+              ok(`Codex MCP timeout: ${actualTimeout}s`)
+            } else {
+              fail("Codex MCP timeout does not match configuration")
+            }
+          } catch (error) {
+            fail(`Codex MCP timeout unavailable: ${error.message}`)
+          }
         } else {
           fail("Codex MCP registration missing")
         }

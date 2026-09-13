@@ -65,6 +65,7 @@ function validState(env, overrides = {}) {
         mcpName: "opencode-agents",
         node: "/usr/bin/node",
         server: resolve(env.home, ".local/share/opencode-mcp-orchestrator/current/libexec/mcp-server.mjs"),
+        toolTimeoutSeconds: 1500,
       },
       claude: {
         mcpName: "opencode-agents",
@@ -205,6 +206,9 @@ test("rejects non-hex hashes and bad integration ownership fields", () => {
     const badIntegrations = [
       { codex: { mcpName: "" } },
       { codex: { mcpName: "../evil" } },
+      { codex: { mcpName: "opencode-agents", toolTimeoutSeconds: 0 } },
+      { codex: { mcpName: "opencode-agents", toolTimeoutSeconds: 7201 } },
+      { codex: { mcpName: "opencode-agents", toolTimeoutSeconds: "1500" } },
       { codex: "x" },
       { claude: { mcpName: "opencode-agents", scope: "--evil" } },
       { claude: { mcpName: 42 } },

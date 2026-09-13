@@ -22,6 +22,7 @@ import {
 import {
   BRIDGE_TIMEOUT_ENV_VAR,
   configuredModel,
+  configuredRoleTimeoutSeconds,
   createServer,
   createToolHandlers,
   DEFAULT_BRIDGE_TIMEOUT_MS,
@@ -800,6 +801,7 @@ test("runner handler composes the delegated command task unchanged", async () =>
   assert.match(task, /Maximum runtime: 42 seconds\./)
   assert.equal(captured[2], "opencode-orchestrator-runner")
   assert.equal(captured[3], "runner")
+  assert.equal(captured[4].commandTimeoutSeconds, 42)
 
   await handlers.runner(
     {
@@ -1052,6 +1054,27 @@ test("bridge config validates optional stepLimits through the normalizer", () =>
   )
 })
 
+test("bridge config validates and normalizes optional timeoutLimits", () => {
+  const result = validateBridgeConfig(
+    validBridgeConfig({ timeoutLimits: { profile: "extended" } }),
+    { configPath: "/tmp/config.json" },
+  )
+
+  assert.deepEqual(result.timeoutLimits, {
+    profile: "extended",
+    limits: { scout: 900, worker: 1500, runner: 1800 },
+    parentTimeoutSeconds: 2100,
+  })
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({ timeoutLimits: { profile: "custom", scout: 300, worker: 600, runner: 1200, parent: 1200 } }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "timeoutLimits"/,
+  )
+})
+
 test("bridge config validates optional integrations without echoing contents", () => {
   validateBridgeConfig(
     validBridgeConfig({ integrations: ["codex"] }),
@@ -1295,6 +1318,45 @@ test("configuredModel rejects an unsupported role before indexing models", async
       () => configuredModel("planner"),
       /unsupported.*role.*planner/,
     )
+  })
+
+  if (previous === undefined) {
+    delete process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG
+  } else {
+    process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG = previous
+  }
+})
+
+test("configured role timeout follows explicit and step-profile defaults", async () => {
+  const previous = process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG
+
+  await withTempDir("bridge-timeout-config-", async (dir) => {
+    const path = join(dir, "config.json")
+    process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG = path
+
+    await writeFile(
+      path,
+      JSON.stringify(validBridgeConfig({
+        stepLimits: { profile: "extended" },
+      })),
+    )
+
+    assert.equal(await configuredRoleTimeoutSeconds("worker"), 1500)
+
+    await writeFile(
+      path,
+      JSON.stringify(validBridgeConfig({
+        timeoutLimits: {
+          profile: "custom",
+          scout: 400,
+          worker: 800,
+          runner: 1000,
+          parent: 1100,
+        },
+      })),
+    )
+
+    assert.equal(await configuredRoleTimeoutSeconds("worker"), 800)
   })
 
   if (previous === undefined) {

@@ -27,6 +27,11 @@ import {
 } from "../config/step-limits.mjs"
 
 import {
+  normalizeConfigTimeoutLimits,
+  TIMEOUT_LIMIT_ROLES,
+} from "../config/timeout-limits.mjs"
+
+import {
   assertSafeRecursiveTarget,
   commandExists,
   environmentPaths,
@@ -430,6 +435,9 @@ const stepLimits =
     config.stepLimits,
   )
 
+const timeoutLimits =
+  normalizeConfigTimeoutLimits(config)
+
 for (const role of ["scout", "worker", "runner"]) {
   if (
     typeof config.models?.[role] !== "string" ||
@@ -491,6 +499,8 @@ if (integrations.has("codex")) {
     [
       "--payload",
       resolve(args.payload),
+      "--config",
+      configPath,
     ],
   )
 }
@@ -566,6 +576,21 @@ for (const role of STEP_LIMIT_ROLES) {
     `  ${role.padEnd(7)} ${stepLimits.limits[role]}`,
   )
 }
+
+console.log()
+console.log(
+  `Timeout profile: ${timeoutLimits.profile}`,
+)
+
+for (const role of TIMEOUT_LIMIT_ROLES) {
+  console.log(
+    `  ${role.padEnd(7)} ${timeoutLimits.limits[role]}s`,
+  )
+}
+
+console.log(
+  `  ${"parent".padEnd(7)} ${timeoutLimits.parentTimeoutSeconds}s`,
+)
 
 console.log()
 console.log(

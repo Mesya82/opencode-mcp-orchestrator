@@ -27,6 +27,11 @@ import {
   validateModelReference,
 } from "./config.mjs"
 
+import {
+  assertRunnerTimeoutFits,
+  normalizeConfigTimeoutLimits,
+} from "../config/timeout-limits.mjs"
+
 export const SERVER_VERSION_FALLBACK = "0.0.0-dev"
 
 function injectedBuildVersion() {
@@ -119,13 +124,10 @@ export function resolveServerVersion() {
 }
 
 /*
- * Bridge-level timeout for every delegated MCP operation, independent of
- * any runner command timeout handed to the delegated model. Configurable
- * through OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS with a conservative
- * default and strict numeric bounds (see resolveBridgeTimeoutMs). The
- * default comfortably exceeds the runner tool's 900s delegated command
- * budget plus model analysis overhead, so long delegated runs are not
- * cut off unless an operator opts into a shorter bound.
+ * Compatibility override for every delegated MCP operation, independent of
+ * the configured per-role timeout profile. When the environment variable is
+ * absent, runAgent uses the selected role timeout. The legacy default remains
+ * the fail-closed fallback for an invalid override.
  */
 export const BRIDGE_TIMEOUT_ENV_VAR =
   "OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS"
@@ -174,7 +176,7 @@ export function parseModelReference(reference, role) {
   return validateModelReference(reference, role)
 }
 
-export async function configuredModel(role) {
+async function configuredBridgeConfig() {
   const path = configPath()
 
   let raw
@@ -201,7 +203,11 @@ export async function configuredModel(role) {
     )
   }
 
-  validateBridgeConfig(config, { configPath: path })
+  return validateBridgeConfig(config, { configPath: path })
+}
+
+export async function configuredModel(role) {
+  const config = await configuredBridgeConfig()
 
   if (!MODEL_ROLES.includes(role)) {
     throw new Error(
@@ -213,6 +219,22 @@ export async function configuredModel(role) {
     config.models[role],
     role,
   )
+}
+
+export async function configuredRoleTimeoutSeconds(role) {
+  if (!MODEL_ROLES.includes(role)) {
+    throw new Error(
+      `unsupported timeout role "${role}": expected one of ${MODEL_ROLES.join(", ")}`,
+    )
+  }
+
+  const config = await configuredBridgeConfig()
+  const timeouts =
+    config.timeoutLimits?.limits
+      ? config.timeoutLimits
+      : normalizeConfigTimeoutLimits(config)
+
+  return timeouts.limits[role]
 }
 
 function debug(message) {
@@ -250,6 +272,27 @@ export function resolveBridgeTimeoutMs(env = process.env) {
   }
 
   return parsed
+}
+
+async function resolveOperationTimeoutMs(role, overrides) {
+  if (overrides.timeoutMs !== undefined) {
+    return overrides.timeoutMs
+  }
+
+  const env = overrides.env ?? process.env
+  const raw = env?.[BRIDGE_TIMEOUT_ENV_VAR]
+
+  if (
+    raw !== undefined &&
+    raw !== null &&
+    String(raw).trim() !== ""
+  ) {
+    return resolveBridgeTimeoutMs(env)
+  }
+
+  return (
+    await configuredRoleTimeoutSeconds(role)
+  ) * 1000
 }
 
 function safeHomedir() {
@@ -478,8 +521,17 @@ async function cleanupSession(client, sessionID, succeeded) {
 
 export async function runAgent(directoryArg, task, agent, role, overrides = {}) {
   const timeoutMs =
-    overrides.timeoutMs ??
-    resolveBridgeTimeoutMs(overrides.env ?? process.env)
+    await resolveOperationTimeoutMs(role, overrides)
+
+  if (
+    role === "runner" &&
+    overrides.commandTimeoutSeconds !== undefined
+  ) {
+    assertRunnerTimeoutFits(
+      overrides.commandTimeoutSeconds,
+      Math.floor(timeoutMs / 1000),
+    )
+  }
 
   /*
    * Canonicalize and validate before any OpenCode session exists, so
@@ -636,10 +688,17 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
         requestOptions,
       )
 
+      const budgetedTask = [
+        task,
+        "",
+        `Operation wall-clock budget: ${Math.floor(timeoutMs / 1000)} seconds.`,
+        "Finish tool activity and return the final response before this deadline.",
+      ].join("\n")
+
       await client.session.prompt(
         {
           sessionID,
-          text: task,
+          text: budgetedTask,
         },
         requestOptions,
       )
@@ -890,6 +949,7 @@ export function createToolHandlers(run = runAgent) {
           {
             signal: mcpRequestSignal(ctx),
             workspaceAccess,
+            commandTimeoutSeconds: timeout,
           },
         )
 

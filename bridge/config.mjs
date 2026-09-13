@@ -2,6 +2,10 @@ import {
   normalizeStepLimits,
 } from "../config/step-limits.mjs"
 
+import {
+  normalizeTimeoutLimits,
+} from "../config/timeout-limits.mjs"
+
 export const SUPPORTED_CONFIG_VERSION = 1
 
 export const MODEL_ROLES = Object.freeze([
@@ -110,6 +114,7 @@ export function validateBridgeConfig(config, options = {}) {
       key !== "version" &&
       key !== "models" &&
       key !== "stepLimits" &&
+      key !== "timeoutLimits" &&
       key !== "integrations"
     ) {
       throw new Error(
@@ -160,6 +165,29 @@ export function validateBridgeConfig(config, options = {}) {
     hasNormalizedStepLimits = true
   }
 
+  let normalizedTimeoutLimits
+  let hasNormalizedTimeoutLimits = false
+
+  if (
+    config.timeoutLimits !== undefined
+  ) {
+    if (!isPlainObject(config.timeoutLimits)) {
+      throw new Error(
+        `invalid configuration ${label}: expected timeoutLimits object at path "timeoutLimits"`,
+      )
+    }
+
+    try {
+      normalizedTimeoutLimits = normalizeTimeoutLimits(config.timeoutLimits)
+    } catch {
+      throw new Error(
+        `invalid configuration ${label}: invalid timeoutLimits at path "timeoutLimits"`,
+      )
+    }
+
+    hasNormalizedTimeoutLimits = true
+  }
+
   if (
     config.integrations !== undefined
   ) {
@@ -193,12 +221,20 @@ export function validateBridgeConfig(config, options = {}) {
     }
   }
 
-  if (hasNormalizedStepLimits) {
-    return {
-      ...config,
-      stepLimits: normalizedStepLimits,
-    }
+  if (
+    !hasNormalizedStepLimits &&
+    !hasNormalizedTimeoutLimits
+  ) {
+    return config
   }
 
-  return config
+  return {
+    ...config,
+    ...(hasNormalizedStepLimits
+      ? { stepLimits: normalizedStepLimits }
+      : {}),
+    ...(hasNormalizedTimeoutLimits
+      ? { timeoutLimits: normalizedTimeoutLimits }
+      : {}),
+  }
 }

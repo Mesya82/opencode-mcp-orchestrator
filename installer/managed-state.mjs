@@ -23,6 +23,7 @@ const CODEX_KEYS = Object.freeze([
   "mcpName",
   "node",
   "server",
+  "toolTimeoutSeconds",
 ])
 
 const CLAUDE_KEYS = Object.freeze([
@@ -129,6 +130,21 @@ function validateIntegrationEntry(name, value, basePath) {
         `${basePath}.scope`,
       )
     }
+  }
+
+  if (
+    name === "codex" &&
+    value.toolTimeoutSeconds !== undefined &&
+    (
+      !Number.isInteger(value.toolTimeoutSeconds) ||
+      value.toolTimeoutSeconds <= 0 ||
+      value.toolTimeoutSeconds > 7200
+    )
+  ) {
+    throw invalidState(
+      "invalid Codex MCP timeout",
+      `${basePath}.toolTimeoutSeconds`,
+    )
   }
 
   for (const key of ["node", "server"]) {

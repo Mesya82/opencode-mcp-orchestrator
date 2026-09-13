@@ -13,7 +13,8 @@ problem is that several independent timeout layers do not share one deadline or
 one cancellation contract.
 
 The orchestration tool host stopped waiting after approximately 300 seconds,
-while the current source defaults the bridge operation timeout to 20 minutes.
+while the source at the time defaulted the bridge operation timeout to 20
+minutes.
 Some delegated sessions continued editing after the caller had already
 received a timeout. This makes that host timeout an ambiguous state transition
 rather than a completed cancellation.
@@ -48,7 +49,7 @@ deployment.
 | --- | ---: | --- |
 | Orchestration tool host `tools/call` | approximately 300 seconds | host outside this repository; configuration surface not yet identified |
 | Codex CLI per-tool timeout | 60 seconds by default; `mcp_servers.<id>.tool_timeout_sec` is supported | Codex `config.toml` |
-| Bridge operation | 1,200 seconds | `bridge/server.mjs:runAgent()` |
+| Bridge operation | Standard: Scout 300s, Worker 600s, Runner 1,200s; Extended: 900s/1,500s/1,800s | timeout profile used by `bridge/server.mjs:runAgent()` |
 | Failed-session cleanup | up to 10 seconds for interrupt and 10 seconds for removal | `bridge/server.mjs:cleanupSession()` |
 | Runner command | 900 seconds, accepted range 1-3,600 seconds | delegated `sandbox_run` process timer |
 | Worker verification command | 120 seconds by default, configurable 1-900 seconds | delegated `sandbox_shell` process timer |
@@ -57,13 +58,14 @@ deployment.
 The active Codex registration inspected on 2026-09-13 omitted
 `tool_timeout_sec`. The official Codex configuration reference documents a
 60-second default and a per-server override. Older local configuration backups
-contained `tool_timeout_sec = 900`, but the current installer registers the
-server with `codex mcp add` and does not persist a timeout override.
+contained `tool_timeout_sec = 900`. The timeout-profile implementation now
+persists and verifies this setting after `codex mcp add` recreates the owned
+registration.
 
-The 20-minute bridge default is internally consistent with a 15-minute Runner
-command, but incompatible with an effective five-minute synchronous host. Both
-cannot be supported by one synchronous request unless the effective outer
-deadline can be increased.
+The Standard 20-minute Runner operation deadline is internally consistent with
+the 15-minute default Runner command. The Extended profile gives Muse 30
+minutes and configures a 35-minute Codex parent deadline. Neither profile can
+override an independent five-minute application-host ceiling.
 
 ## Confirmed friction points
 
@@ -177,10 +179,10 @@ bridge deadline and 15-minute default Runner command. This is a supported
 near-term path for the CLI, according to the
 [official Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
-The repository's installer does not currently preserve this setting when it
-recreates an owned MCP registration, and the observed orchestration host may
-have a separate five-minute cap. It also leaves poor recovery behavior when
-transports disappear.
+The installer now persists and doctor-checks this setting when it recreates an
+owned Codex MCP registration. The observed orchestration host may still have a
+separate five-minute cap. A longer deadline also leaves poor recovery behavior
+when transports disappear.
 
 This option must be proven independently for Codex CLI, the Codex app/tool
 host, and Claude rather than assumed from one client's configuration.
@@ -331,9 +333,8 @@ Before changing production defaults, add live and unit coverage for:
 ## Implementation order
 
 1. Instrument operation/session lifecycle and create a live cancellation test.
-2. Add an installer-safe way to preserve/configure Codex
-   `tool_timeout_sec`, then test a call longer than five minutes through the
-   freshly restarted Codex integration.
+2. Test the configured Codex `tool_timeout_sec` with a call longer than five
+   minutes through the freshly installed and restarted Codex integration.
 3. Verify actual Codex app/tool-host and Claude outer deadlines and
    cancellation behavior.
 4. Introduce configured caller budget and reject impossible synchronous

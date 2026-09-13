@@ -43,6 +43,19 @@ import {
   stepLimitConfig,
 } from "../config/step-limits.mjs"
 
+import {
+  MAX_PARENT_TIMEOUT_SECONDS,
+  MAX_ROLE_TIMEOUT_SECONDS,
+  MIN_PARENT_RESERVE_SECONDS,
+  MIN_PARENT_TIMEOUT_SECONDS,
+  MIN_ROLE_TIMEOUT_SECONDS,
+  normalizeConfigTimeoutLimits,
+  normalizeTimeoutLimits,
+  TIMEOUT_LIMIT_PROFILES,
+  TIMEOUT_LIMIT_ROLES,
+  timeoutLimitConfig,
+} from "../config/timeout-limits.mjs"
+
 function parseArgs(argv) {
   const result = {
     config: null,
@@ -77,7 +90,7 @@ Available choices are discovered from the user's current OpenCode
 installation. No provider or model list is maintained by this project.
 
 The configurator also selects Standard, Extended, or Custom model-step
-limits for the delegated roles.
+and wall-clock timeout limits for the delegated roles.
 `)
       process.exit(0)
     }
@@ -693,6 +706,101 @@ config.stepLimits =
     customLimits,
   )
 
+const currentTimeoutLimits =
+  normalizeConfigTimeoutLimits(config)
+
+const timeoutProfile =
+  await select({
+    message: "Select delegated-agent timeout profile",
+    default:
+      config.timeoutLimits === undefined &&
+      Object.hasOwn(TIMEOUT_LIMIT_PROFILES, stepProfile)
+        ? stepProfile
+        : currentTimeoutLimits.profile,
+    choices: [
+      {
+        name:
+          `Standard — Scout ${TIMEOUT_LIMIT_PROFILES.standard.scout}s, Worker ${TIMEOUT_LIMIT_PROFILES.standard.worker}s, Runner ${TIMEOUT_LIMIT_PROFILES.standard.runner}s, parent ${TIMEOUT_LIMIT_PROFILES.standard.parent}s`,
+        value: "standard",
+        description:
+          "Wall-clock budgets for typical focused delegation.",
+      },
+      {
+        name:
+          `Extended — Scout ${TIMEOUT_LIMIT_PROFILES.extended.scout}s, Worker ${TIMEOUT_LIMIT_PROFILES.extended.worker}s, Runner ${TIMEOUT_LIMIT_PROFILES.extended.runner}s, parent ${TIMEOUT_LIMIT_PROFILES.extended.parent}s`,
+        value: "extended",
+        description:
+          "Longer budgets for Muse and tool-heavy delegated work.",
+      },
+      {
+        name: "Custom — configure each role and parent",
+        value: "custom",
+        description:
+          "Set independent wall-clock budgets with a validated parent reserve.",
+      },
+    ],
+  })
+
+let customTimeouts
+
+if (timeoutProfile === "custom") {
+  customTimeouts = {}
+
+  for (const role of TIMEOUT_LIMIT_ROLES) {
+    const fallback =
+      currentTimeoutLimits.limits[role] ??
+      TIMEOUT_LIMIT_PROFILES.standard[role]
+
+    const answer =
+      await input({
+        message: `Wall-clock timeout in seconds for ${role}`,
+        default: String(fallback),
+        validate: (value) => {
+          const parsed = Number(value)
+
+          return (
+            Number.isInteger(parsed) &&
+            parsed >= MIN_ROLE_TIMEOUT_SECONDS &&
+            parsed <= MAX_ROLE_TIMEOUT_SECONDS
+          )
+            ? true
+            : `Enter an integer from ${MIN_ROLE_TIMEOUT_SECONDS} to ${MAX_ROLE_TIMEOUT_SECONDS}`
+        },
+      })
+
+    customTimeouts[role] = Number(answer)
+  }
+
+  const parentAnswer =
+    await input({
+      message: "Parent MCP timeout in seconds",
+      default: String(currentTimeoutLimits.parentTimeoutSeconds),
+      validate: (value) => {
+        const parsed = Number(value)
+        const longest = Math.max(
+          ...TIMEOUT_LIMIT_ROLES.map((role) => customTimeouts[role]),
+        )
+
+        return (
+          Number.isInteger(parsed) &&
+          parsed >= MIN_PARENT_TIMEOUT_SECONDS &&
+          parsed <= MAX_PARENT_TIMEOUT_SECONDS &&
+          parsed >= longest + MIN_PARENT_RESERVE_SECONDS
+        )
+          ? true
+          : `Enter an integer from ${Math.max(MIN_PARENT_TIMEOUT_SECONDS, longest + MIN_PARENT_RESERVE_SECONDS)} to ${MAX_PARENT_TIMEOUT_SECONDS}`
+      },
+    })
+
+  customTimeouts.parent = Number(parentAnswer)
+}
+
+config.timeoutLimits =
+  timeoutLimitConfig(
+    timeoutProfile,
+    customTimeouts,
+  )
+
 mkdirSync(
   dirname(configPath),
   {
@@ -744,6 +852,26 @@ for (const role of STEP_LIMIT_ROLES) {
     `  ${role.padEnd(7)} ${savedStepLimits.limits[role]}`,
   )
 }
+
+const savedTimeoutLimits =
+  normalizeTimeoutLimits(
+    config.timeoutLimits,
+  )
+
+console.log()
+console.log(
+  `Timeout profile: ${savedTimeoutLimits.profile}`,
+)
+
+for (const role of TIMEOUT_LIMIT_ROLES) {
+  console.log(
+    `  ${role.padEnd(7)} ${savedTimeoutLimits.limits[role]}s`,
+  )
+}
+
+console.log(
+  `  ${"parent".padEnd(7)} ${savedTimeoutLimits.parentTimeoutSeconds}s`,
+)
 
 console.log()
 console.log(

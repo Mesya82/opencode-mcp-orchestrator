@@ -128,6 +128,9 @@ Example:
       "stepLimits": {
         "profile": "standard"
       },
+      "timeoutLimits": {
+        "profile": "standard"
+      },
       "integrations": [
         "codex",
         "claude"
@@ -168,6 +171,46 @@ A non-interactive custom configuration uses:
         "runner": 48
       }
     }
+
+## Timeout profiles
+
+Wall-clock timeouts are independent from model-step limits. The installer
+selects both profiles together by default, while allowing either to be changed
+independently.
+
+| Profile | Scout | Worker | Runner | Codex parent | Intended use |
+| --- | ---: | ---: | ---: | ---: | --- |
+| Standard | 300s | 600s | 1,200s | 1,500s | Focused delegation |
+| Extended | 900s | 1,500s | 1,800s | 2,100s | Muse and tool-heavy work |
+| Custom | User-selected | User-selected | User-selected | User-selected | Explicit per-role and parent control |
+
+The parent timeout must be at least 60 seconds longer than every role timeout.
+Runner command timeouts must leave at least 60 seconds inside the Runner
+operation deadline for analysis, synthesis, and cleanup. Impossible
+combinations fail before an OpenCode session is created.
+
+When Codex integration is selected, installation writes the profile's parent
+deadline to `mcp_servers.opencode-agents.tool_timeout_sec` in Codex
+`config.toml`. An existing Extended step profile without `timeoutLimits`
+automatically receives the Extended timeout defaults; other older
+configurations receive Standard defaults.
+
+A non-interactive custom timeout configuration uses:
+
+    {
+      "timeoutLimits": {
+        "profile": "custom",
+        "scout": 600,
+        "worker": 1200,
+        "runner": 1800,
+        "parent": 2100
+      }
+    }
+
+`OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS` remains available as a
+deployment-wide compatibility override. When set, it replaces the configured
+per-role operation deadline and is validated against the existing 1-second to
+1-hour bounds.
 
 ## Installed layout
 
@@ -392,6 +435,8 @@ The doctor checks:
 - installed core files
 - configured role models
 - the step-limit profile and per-role values
+- the timeout profile, per-role values, and parent MCP deadline
+- the installed Codex MCP timeout matches the orchestrator configuration
 - installed agent definitions match the configured limits
 - OpenCode agents/plugin
 - selected Codex integration

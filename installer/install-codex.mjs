@@ -29,9 +29,19 @@ import {
   SUBPROCESS_PROBE_TIMEOUT_MS,
 } from "./path-security.mjs"
 
+import {
+  codexConfigPath,
+  setCodexMcpToolTimeout,
+} from "./codex-config.mjs"
+
+import {
+  normalizeConfigTimeoutLimits,
+} from "../config/timeout-limits.mjs"
+
 function parseArgs(argv) {
   const result = {
     payload: null,
+    config: null,
   }
 
   for (let i = 0; i < argv.length; i++) {
@@ -42,10 +52,15 @@ function parseArgs(argv) {
       continue
     }
 
+    if (arg === "--config") {
+      result.config = argv[++i]
+      continue
+    }
+
     if (arg === "--help" || arg === "-h") {
       console.log(`
 Usage:
-  install-codex.mjs --payload PATH
+  install-codex.mjs --payload PATH --config PATH
 `)
       process.exit(0)
     }
@@ -55,6 +70,10 @@ Usage:
 
   if (!result.payload) {
     throw new Error("--payload is required")
+  }
+
+  if (!result.config) {
+    throw new Error("--config is required")
   }
 
   return result
@@ -225,6 +244,17 @@ const args =
     process.argv.slice(2),
   )
 
+const orchestratorConfig =
+  JSON.parse(
+    readFileSync(
+      resolve(args.config),
+      "utf8",
+    ),
+  )
+
+const timeoutLimits =
+  normalizeConfigTimeoutLimits(orchestratorConfig)
+
 const home =
   process.env.HOME
 
@@ -390,10 +420,43 @@ run(
   ],
 )
 
+const codexConfigurationPath =
+  codexConfigPath()
+
+if (!existsSync(codexConfigurationPath)) {
+  throw new Error(
+    `Codex configuration missing after MCP registration: ${codexConfigurationPath}`,
+  )
+}
+
+const codexConfiguration =
+  readFileSync(
+    codexConfigurationPath,
+    "utf8",
+  )
+
+writeFileSync(
+  codexConfigurationPath,
+  setCodexMcpToolTimeout(
+    codexConfiguration,
+    mcpName,
+    timeoutLimits.parentTimeoutSeconds,
+  ),
+  {
+    mode: 0o600,
+  },
+)
+
+chmodSync(
+  codexConfigurationPath,
+  0o600,
+)
+
 state.integrations.codex = {
   mcpName,
   node,
   server: mcpServer,
+  toolTimeoutSeconds: timeoutLimits.parentTimeoutSeconds,
 }
 
 mkdirSync(

@@ -11,9 +11,13 @@ a caller-side wait limit. The delegated OpenCode session can keep running after
 the caller stops waiting and may still edit workspace files.
 
 This is different from the bridge-level session timeout and cancellation in
-current source (`OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS`, default
-20 minutes). The bridge timeout aborts the operation and attempts best-effort
-session interrupt and removal. Caller timeouts do not.
+current source. Standard and Extended timeout profiles select independent
+Scout, Worker, and Runner deadlines;
+`OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS` remains a global compatibility
+override. The bridge timeout aborts the operation and attempts best-effort
+session interrupt and removal. Caller timeouts cancel the session only when
+the host sends the MCP cancellation notification; this works in the live SDK
+probe but is not yet proven for the observed five-minute host boundary.
 
 After any delegated infrastructure timeout, check Git status and diff before
 assuming nothing changed. Do not assume timeout means no edits.
