@@ -99,6 +99,15 @@ test("installer renders default and custom step-limit profiles", () => {
     assert.match(installedAgent(testRoot, "scout"), /^steps: 16$/m)
     assert.match(installedAgent(testRoot, "worker"), /^steps: 32$/m)
     assert.match(installedAgent(testRoot, "runner"), /^steps: 40$/m)
+    assert.match(installedAgent(testRoot, "runner-writable"), /^steps: 40$/m)
+    assert.match(
+      installedAgent(testRoot, "runner-writable"),
+      /at most 40 model steps/,
+    )
+    assert.match(
+      installedAgent(testRoot, "runner-writable"),
+      /by step 32 of 40/,
+    )
 
     writeConfig(
       configPath,
@@ -123,6 +132,16 @@ test("installer renders default and custom step-limit profiles", () => {
     assert.match(installedAgent(testRoot, "scout"), /by step 19 of 24/)
     assert.match(installedAgent(testRoot, "worker"), /^steps: 36$/m)
     assert.match(installedAgent(testRoot, "runner"), /^steps: 48$/m)
+    assert.match(installedAgent(testRoot, "runner"), /by step 38 of 48/)
+    assert.match(installedAgent(testRoot, "runner-writable"), /^steps: 48$/m)
+    assert.match(
+      installedAgent(testRoot, "runner-writable"),
+      /at most 48 model steps/,
+    )
+    assert.match(
+      installedAgent(testRoot, "runner-writable"),
+      /by step 38 of 48/,
+    )
   } finally {
     rmSync(
       testRoot,

@@ -50,6 +50,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Security audit
+        run: npm run audit:security
+
+      - name: Typecheck sandbox plugin
+        run: npm run typecheck
+
       - name: Full clean-container E2E
         env:
           E2E_CONTAINER_RUNTIME: docker
@@ -88,6 +94,42 @@ jobs:
           node scripts/package-release.mjs \
             --version "$VERSION" \
             --repository "$GITHUB_REPOSITORY"
+
+      - name: Generate SPDX SBOM
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          npm sbom --sbom-format spdx > "release/opencode-mcp-orchestrator-${VERSION}.spdx.json"
+
+          test -s "release/opencode-mcp-orchestrator-${VERSION}.spdx.json"
+
+      - name: Validate SPDX SBOM
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          SBOM="release/opencode-mcp-orchestrator-${VERSION}.spdx.json"
+
+          test -s "$SBOM"
+
+          node -e '
+            const fs = require("fs");
+            const sbomPath = process.argv[1];
+            const raw = fs.readFileSync(sbomPath, "utf8");
+            if (!raw.trim()) {
+              throw new Error("SBOM is empty: " + sbomPath);
+            }
+            const parsed = JSON.parse(raw);
+            if (!JSON.stringify(parsed).includes("opencode-mcp-orchestrator")) {
+              throw new Error("SBOM does not identify opencode-mcp-orchestrator");
+            }
+            console.log("SBOM_SPDX_VALID");
+          ' "$SBOM"
 
       - name: Verify release checksum
         working-directory: release
@@ -194,6 +236,7 @@ jobs:
             "release/install.sh" \
             "release/opencode-mcp-orchestrator-${VERSION}.tar.gz" \
             "release/SHA256SUMS" \
+            "release/opencode-mcp-orchestrator-${VERSION}.spdx.json" \
             --verify-tag \
             --title "OpenCode MCP Orchestrator ${VERSION}" \
             --generate-notes

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import {
+  chmodSync,
   cpSync,
   existsSync,
   mkdirSync,
@@ -14,6 +15,15 @@ import {
 import {
   resolve,
 } from "node:path"
+
+import {
+  assertSafeRecursiveTarget,
+  environmentPaths,
+} from "./path-security.mjs"
+
+import {
+  validateReleaseManifest,
+} from "./manifest.mjs"
 
 function parseArgs(argv) {
   const result = {
@@ -62,40 +72,6 @@ Usage:
   return result
 }
 
-function environmentPaths() {
-  const home = process.env.HOME
-
-  if (!home) {
-    throw new Error("HOME is not set")
-  }
-
-  const dataHome =
-    process.env.XDG_DATA_HOME ||
-    resolve(home, ".local/share")
-
-  const configHome =
-    process.env.XDG_CONFIG_HOME ||
-    resolve(home, ".config")
-
-  return {
-    home,
-    dataHome,
-    configHome,
-
-    appData:
-      resolve(
-        dataHome,
-        "opencode-mcp-orchestrator",
-      ),
-
-    appConfig:
-      resolve(
-        configHome,
-        "opencode-mcp-orchestrator",
-      ),
-  }
-}
-
 function copyTree(source, destination) {
   cpSync(
     source,
@@ -128,6 +104,17 @@ const sourceManifest =
       "utf8",
     ),
   )
+
+/*
+ * Fail closed before any installation mutation (directory creation,
+ * copy, removal, or configuration writes). Structural and payload-file
+ * checks reject malformed or ambiguous manifests with field-specific
+ * errors that never print manifest contents.
+ */
+validateReleaseManifest(
+  sourceManifest,
+  payload,
+)
 
 const paths =
   environmentPaths()
@@ -202,6 +189,27 @@ const nextInstallDir =
     `.current.next-${process.pid}`,
   )
 
+/*
+ * Fail closed before any recursive replacement/removal. Each target must
+ * resolve inside the configured XDG data root and must not be /, HOME,
+ * the data-home root itself, or a symlink masquerading as a real
+ * directory.
+ */
+assertSafeRecursiveTarget(
+  paths.appData,
+  paths,
+)
+
+assertSafeRecursiveTarget(
+  installDir,
+  paths,
+)
+
+assertSafeRecursiveTarget(
+  nextInstallDir,
+  paths,
+)
+
 rmSync(
   nextInstallDir,
   {
@@ -254,6 +262,11 @@ if (!existsSync(userConfig)) {
       mode: 0o600,
     },
   )
+
+  chmodSync(
+    userConfig,
+    0o600,
+  )
 }
 
 const installedManifest = {
@@ -285,6 +298,14 @@ writeFileSync(
     null,
     2,
   ) + "\n",
+  {
+    mode: 0o644,
+  },
+)
+
+chmodSync(
+  installManifestPath,
+  0o644,
 )
 
 console.log("Core payload installed.")

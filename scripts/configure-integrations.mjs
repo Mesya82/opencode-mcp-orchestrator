@@ -1,23 +1,23 @@
 #!/usr/bin/env node
 
 import {
-  constants,
   existsSync,
-  accessSync,
   mkdirSync,
   readFileSync,
   writeFileSync,
 } from "node:fs"
 
 import {
-  delimiter,
   dirname,
-  join,
 } from "node:path"
 
 import {
   checkbox,
 } from "@inquirer/prompts"
+
+import {
+  findExecutable,
+} from "../installer/path-security.mjs"
 
 function parseArgs(argv) {
   const result = {
@@ -57,34 +57,6 @@ function defaultConfigPath() {
     `${process.env.HOME}/.config`
 
   return `${configHome}/opencode-mcp-orchestrator/config.json`
-}
-
-function findExecutable(name) {
-  const path =
-    process.env.PATH ?? ""
-
-  for (
-    const directory
-    of path.split(delimiter)
-  ) {
-    if (!directory) continue
-
-    const candidate =
-      join(directory, name)
-
-    try {
-      accessSync(
-        candidate,
-        constants.X_OK,
-      )
-
-      return candidate
-    } catch {
-      // Continue searching PATH.
-    }
-  }
-
-  return null
 }
 
 function loadConfig(path) {

@@ -302,6 +302,10 @@ Examples:
 
 The parent receives a concise analysis rather than the entire command output.
 
+Runner `workspace_access` defaults to `read_only`; request `"writable"`
+explicitly when the command must write the workspace. Details and log
+retention are in docs/orchestration-friction.md.
+
 Deployments and similarly high-risk operations are intentionally not delegated
 by the orchestration policy.
 
@@ -318,7 +322,48 @@ The delegated command environment has been designed and tested so that:
 - Runner can persist and analyze large command logs without returning the full
   log to the parent model
 
+### Sandbox toolchains
+
+`sandbox_shell` and `sandbox_run` expose only the workspace and safe system
+paths by default. To make a user-installed toolchain available without
+exposing `$HOME`, set `OPENCODE_SANDBOX_TOOLCHAIN_DIRS` to a
+platform-delimited list of absolute toolchain `bin` directories. Each exact
+directory is mounted read-only at the same absolute path and appended to the
+sandbox `PATH`. Invalid entries fail closed.
+
+Example (NVM without mounting all of `~/.nvm`):
+
+    OPENCODE_SANDBOX_TOOLCHAIN_DIRS="$HOME/.nvm/versions/node/<version>/bin"
+
+### Sandbox resource limits
+
+Sandbox timeouts and caps have safe defaults and hard bounds. Each value is a
+strict integer; unset variables preserve the default. Invalid, non-integer, or
+out-of-range values fail closed.
+
+| Variable | Default | Allowed range |
+| --- | ---: | ---: |
+| `OPENCODE_SANDBOX_SHELL_TIMEOUT_MS` | `120000` | `1000`..`900000` |
+| `OPENCODE_SANDBOX_SHELL_MAX_OUTPUT_BYTES` | `30000` | `4096`..`1048576` |
+| `OPENCODE_SANDBOX_RUNNER_LOG_LIMIT_BYTES` | `134217728` | `1048576`..`536870912` |
+| `OPENCODE_SANDBOX_RUN_RETENTION_HOURS` | `24` | `1`..`168` |
+| `OPENCODE_SANDBOX_RUN_RETENTION_COUNT` | `20` | `1`..`200` |
+
 See SECURITY.md for the threat model and limitations.
+
+See docs/orchestration-friction.md for observed caller-vs-bridge timeouts,
+provider compatibility, sandbox toolchains, Runner access modes, and log
+retention.
+
+## Troubleshooting
+
+For observed runtime friction, see docs/orchestration-friction.md: caller-side
+versus bridge-level timeouts, provider compatibility, sandbox toolchains,
+Runner access modes, and log retention.
+
+For the detailed subagent reliability review and proposed synchronous versus
+asynchronous timeout architecture, see
+docs/subagent-usage-friction-review.md.
 
 ## Managed-file safety
 
@@ -449,9 +494,23 @@ triggers the release workflow, which:
 2. builds bundled runtime artifacts
 3. validates entrypoints
 4. constructs the release archive
-5. verifies its checksum and contents
-6. renders the GitHub-specific bootstrap installer
-7. publishes the three release assets
+5. generates and validates the unsigned SPDX SBOM
+6. verifies its checksum and contents
+7. renders the GitHub-specific bootstrap installer
+8. publishes the four release assets
+
+Release assets are:
+
+- `install.sh`
+- `opencode-mcp-orchestrator-${VERSION}.tar.gz`
+- `SHA256SUMS`
+- `opencode-mcp-orchestrator-${VERSION}.spdx.json`
+
+The SPDX SBOM is unsigned and is published without provenance or
+attestation. `SHA256SUMS` provides SHA-256 integrity checking for the
+release archive; it is not signing or provenance. The bootstrap
+`SHA256SUMS` lookup is unchanged: it selects the single release archive
+entry.
 
 ## Project status
 

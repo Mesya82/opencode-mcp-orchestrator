@@ -18,6 +18,13 @@ import {
   STEP_LIMIT_ROLES,
 } from "../config/step-limits.mjs"
 
+import {
+  commandExists,
+  isProbeTimeoutResult,
+  probeTimeoutMessage,
+  SUBPROCESS_PROBE_TIMEOUT_MS,
+} from "./path-security.mjs"
+
 function parseArgs(argv) {
   const result = {
     config: null,
@@ -61,24 +68,6 @@ function fail(message) {
   failures++
 }
 
-function commandExists(name) {
-  const result =
-    spawnSync(
-      "/usr/bin/env",
-      [
-        "bash",
-        "-c",
-        `command -v ${name}`,
-      ],
-      {
-        encoding: "utf8",
-        env: process.env,
-      },
-    )
-
-  return result.status === 0
-}
-
 function run(command, args, cwd) {
   return spawnSync(
     command,
@@ -87,6 +76,7 @@ function run(command, args, cwd) {
       cwd,
       encoding: "utf8",
       env: process.env,
+      timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
     },
   )
 }
@@ -273,6 +263,10 @@ for (const { relative, role } of [
     role: "runner",
   },
   {
+    relative: "agents/opencode-orchestrator-runner-writable.md",
+    role: "runner",
+  },
+  {
     relative: "plugins/opencode-mcp-orchestrator/index.ts",
   },
 ]) {
@@ -340,16 +334,20 @@ for (
           home,
         )
 
-      const text =
-        `${result.stdout}\n${result.stderr}`
-
-      if (
-        result.status === 0 &&
-        text.includes("opencode-agents")
-      ) {
-        ok("Codex MCP registration")
+      if (isProbeTimeoutResult(result)) {
+        fail(probeTimeoutMessage("codex"))
       } else {
-        fail("Codex MCP registration missing")
+        const text =
+          `${result.stdout}\n${result.stderr}`
+
+        if (
+          result.status === 0 &&
+          text.includes("opencode-agents")
+        ) {
+          ok("Codex MCP registration")
+        } else {
+          fail("Codex MCP registration missing")
+        }
       }
     }
   }
@@ -381,7 +379,9 @@ for (
           home,
         )
 
-      if (result.status === 0) {
+      if (isProbeTimeoutResult(result)) {
+        fail(probeTimeoutMessage("claude"))
+      } else if (result.status === 0) {
         ok("Claude Code MCP registration")
       } else {
         fail("Claude Code MCP registration missing")

@@ -27,6 +27,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Security audit
+        run: npm run audit:security
+
+      - name: Typecheck sandbox plugin
+        run: npm run typecheck
+
       - name: Build and run focused tests
         run: npm test
 

@@ -73,6 +73,9 @@ Use sandbox_shell for focused verification such as:
 - git diff --check
 - other directly relevant local checks
 
+sandbox_shell commands use a configured timeout (default 120 seconds); split longer work into
+smaller commands or use Runner with an explicit timeout.
+
 In your final response report:
 - files changed
 - exact behavioral change

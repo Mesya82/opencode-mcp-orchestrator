@@ -268,6 +268,9 @@ Examples:
 Action:
 - stop the delegated task
 - report the concrete failure
+- after any delegated infrastructure timeout, check Git status and the focused
+  diff for the delegated worktree because the session may continue after the
+  caller stops waiting; do not assume timeout means no edits
 - do not silently replace it with direct Sol repository work
 - do not silently switch to Pi
 - do not silently switch to Qwen

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -20,6 +21,13 @@ import {
 import {
   spawnSync,
 } from "node:child_process"
+
+import {
+  findExecutable,
+  isProbeTimeoutResult,
+  probeTimeoutMessage,
+  SUBPROCESS_PROBE_TIMEOUT_MS,
+} from "./path-security.mjs"
 
 function parseArgs(argv) {
   const result = {
@@ -67,6 +75,7 @@ function run(command, args, cwd) {
         cwd,
         encoding: "utf8",
         env: process.env,
+        timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
       },
     )
 
@@ -78,6 +87,12 @@ function requireSuccess(
   command,
   args,
 ) {
+  if (isProbeTimeoutResult(result)) {
+    throw new Error(
+      probeTimeoutMessage(command),
+    )
+  }
+
   if (result.status !== 0) {
     throw new Error(
       [
@@ -92,28 +107,6 @@ function requireSuccess(
   }
 
   return result
-}
-
-function findExecutable(name) {
-  const result =
-    spawnSync(
-      "/usr/bin/env",
-      [
-        "bash",
-        "-c",
-        `command -v ${name}`,
-      ],
-      {
-        encoding: "utf8",
-        env: process.env,
-      },
-    )
-
-  if (result.status !== 0) {
-    return null
-  }
-
-  return result.stdout.trim() || null
 }
 
 function loadState(path) {
@@ -163,6 +156,11 @@ function installManagedFile({
       sha256(destination)
 
     if (currentHash === sourceHash) {
+      chmodSync(
+        destination,
+        0o644,
+      )
+
       state.files[destination] = {
         sha256: sourceHash,
       }
@@ -181,6 +179,11 @@ function installManagedFile({
       copyFileSync(
         source,
         destination,
+      )
+
+      chmodSync(
+        destination,
+        0o644,
       )
 
       state.files[destination] = {
@@ -213,6 +216,11 @@ function installManagedFile({
   copyFileSync(
     source,
     destination,
+  )
+
+  chmodSync(
+    destination,
+    0o644,
   )
 
   state.files[destination] = {
@@ -346,6 +354,12 @@ if (!alreadyOwned) {
       home,
     )
 
+  if (isProbeTimeoutResult(existing)) {
+    throw new Error(
+      probeTimeoutMessage(claude),
+    )
+  }
+
   if (existing.status === 0) {
     throw new Error(
       [
@@ -358,18 +372,28 @@ if (!alreadyOwned) {
 } else {
   /*
    * Only remove a registration that this installer already owns.
+   *
+   * Nonzero removal is intentionally ignored here; a timeout is not
+   * and must surface instead of silently looking like absence.
    */
-  run(
-    claude,
-    [
-      "mcp",
-      "remove",
-      mcpName,
-      "--scope",
-      "user",
-    ],
-    home,
-  )
+  const ownedRemoval =
+    run(
+      claude,
+      [
+        "mcp",
+        "remove",
+        mcpName,
+        "--scope",
+        "user",
+      ],
+      home,
+    )
+
+  if (isProbeTimeoutResult(ownedRemoval)) {
+    throw new Error(
+      probeTimeoutMessage(claude),
+    )
+  }
 }
 
 const addArgs = [
@@ -418,6 +442,11 @@ writeFileSync(
   {
     mode: 0o600,
   },
+)
+
+chmodSync(
+  statePath,
+  0o600,
 )
 
 console.log()

@@ -8,6 +8,7 @@ import {
 } from "node:fs"
 
 import {
+  basename,
   dirname,
   resolve,
 } from "node:path"
@@ -24,6 +25,12 @@ import {
   normalizeStepLimits,
   STEP_LIMIT_ROLES,
 } from "../config/step-limits.mjs"
+
+import {
+  assertSafeRecursiveTarget,
+  commandExists,
+  environmentPaths,
+} from "./path-security.mjs"
 
 const here =
   dirname(
@@ -93,27 +100,12 @@ Interactive installer for OpenCode MCP Orchestrator.
   return result
 }
 
-function commandExists(name) {
-  const result =
-    spawnSync(
-      "/usr/bin/env",
-      [
-        "bash",
-        "-c",
-        `command -v ${name}`,
-      ],
-      {
-        encoding: "utf8",
-        env: process.env,
-      },
-    )
-
-  return (
-    result.status === 0 &&
-    result.stdout.trim() !== ""
-  )
-}
-
+/*
+ * Installer orchestration (including interactive configuration) is
+ * intentionally unbounded: short MCP/version/path probe timeouts do not
+ * apply here. ETIMEDOUT is still distinguished with a command-name-only
+ * error that never includes environment or config contents.
+ */
 function runNodeScript(
   path,
   args = [],
@@ -153,6 +145,12 @@ function runNodeScript(
       )
 
     if (result.error) {
+      if (result.error?.code === "ETIMEDOUT") {
+        throw new Error(
+          `${basename(path)} timed out`,
+        )
+      }
+
       throw result.error
     }
 
@@ -324,23 +322,25 @@ const configPath =
   args.config ||
   defaultConfigPath()
 
-const dataHome =
-  process.env.XDG_DATA_HOME ||
-  resolve(
-    process.env.HOME,
-    ".local/share",
-  )
-
-const appData =
-  resolve(
-    dataHome,
-    "opencode-mcp-orchestrator",
-  )
+const {
+  dataHome,
+  appData,
+} =
+  environmentPaths()
 
 const replacingExistingInstallation =
   existsSync(appData)
 
 if (replacingExistingInstallation) {
+  assertSafeRecursiveTarget(
+    appData,
+    {
+      home: process.env.HOME,
+      dataHome,
+      appData,
+    },
+  )
+
   console.log()
   console.log(
     "Existing installation detected.",

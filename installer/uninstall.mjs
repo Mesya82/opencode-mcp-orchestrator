@@ -22,6 +22,19 @@ import {
   spawnSync,
 } from "node:child_process"
 
+import {
+  assertSafeRecursiveTarget,
+  commandExists,
+  environmentPaths,
+  isProbeTimeoutResult,
+  probeTimeoutMessage,
+  SUBPROCESS_PROBE_TIMEOUT_MS,
+} from "./path-security.mjs"
+
+import {
+  loadManagedState,
+} from "./managed-state.mjs"
+
 function parseArgs(argv) {
   const result = {
     purgeConfig: false,
@@ -72,23 +85,6 @@ function sha256(path) {
     .digest("hex")
 }
 
-function commandExists(name) {
-  const result =
-    spawnSync(
-      "/usr/bin/env",
-      ["bash", "-c", `command -v ${name}`],
-      {
-        encoding: "utf8",
-        env: process.env,
-      },
-    )
-
-  return (
-    result.status === 0 &&
-    result.stdout.trim() !== ""
-  )
-}
-
 function removeEmptyUpward(path, stop) {
   let current = path
 
@@ -120,32 +116,14 @@ const args =
     process.argv.slice(2),
   )
 
-const home =
-  process.env.HOME
-
-if (!home) {
-  throw new Error("HOME is not set")
-}
-
-const configHome =
-  process.env.XDG_CONFIG_HOME ||
-  resolve(home, ".config")
-
-const dataHome =
-  process.env.XDG_DATA_HOME ||
-  resolve(home, ".local/share")
-
-const appConfig =
-  resolve(
-    configHome,
-    "opencode-mcp-orchestrator",
-  )
-
-const appData =
-  resolve(
-    dataHome,
-    "opencode-mcp-orchestrator",
-  )
+const {
+  home,
+  configHome,
+  dataHome,
+  appConfig,
+  appData,
+} =
+  environmentPaths()
 
 const statePath =
   resolve(
@@ -160,17 +138,23 @@ const userConfig =
   )
 
 let state = {
+  formatVersion: 1,
   files: {},
   integrations: {},
 }
 
 if (existsSync(statePath)) {
+  /*
+   * Fail closed before any integration removal or filesystem mutation.
+   * Malformed, out-of-scope, or tampered state never drives removals.
+   */
   state =
-    JSON.parse(
-      readFileSync(
-        statePath,
-        "utf8",
-      ),
+    loadManagedState(
+      statePath,
+      {
+        home,
+        configHome,
+      },
     )
 }
 
@@ -238,10 +222,22 @@ if (
       {
         encoding: "utf8",
         env: process.env,
+        timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
       },
     )
 
-  if (
+  if (isProbeTimeoutResult(result)) {
+    const message =
+      probeTimeoutMessage("codex")
+
+    if (args.forUpdate) {
+      throw new Error(message)
+    }
+
+    console.log(
+      `  WARNING  ${message}`,
+    )
+  } else if (
     result.status === 0 ||
     /not found|does not exist/i.test(
       `${result.stdout}\n${result.stderr}`,
@@ -285,10 +281,22 @@ if (
         cwd: home,
         encoding: "utf8",
         env: process.env,
+        timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
       },
     )
 
-  if (
+  if (isProbeTimeoutResult(result)) {
+    const message =
+      probeTimeoutMessage("claude")
+
+    if (args.forUpdate) {
+      throw new Error(message)
+    }
+
+    console.log(
+      `  WARNING  ${message}`,
+    )
+  } else if (
     result.status === 0 ||
     /not found|does not exist/i.test(
       `${result.stdout}\n${result.stderr}`,
@@ -404,6 +412,15 @@ console.log(
 )
 
 if (existsSync(appData)) {
+  assertSafeRecursiveTarget(
+    appData,
+    {
+      home,
+      dataHome,
+      appData,
+    },
+  )
+
   rmSync(
     appData,
     {

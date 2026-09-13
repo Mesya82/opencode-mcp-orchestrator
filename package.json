@@ -5,7 +5,9 @@
   "type": "module",
   "description": "Sandboxed OpenCode-backed scout, worker, and runner delegation over MCP.",
   "scripts": {
+    "audit:security": "npm audit --audit-level=high",
     "build": "node scripts/build-release.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.sandbox-tools.json",
     "configure": "node scripts/configure-models.mjs",
     "package:release": "node scripts/package-release.mjs",
     "test": "npm run build && npm run test:focused",
@@ -24,6 +26,9 @@
     "zod": "^4.6.2"
   },
   "devDependencies": {
-    "esbuild": "0.28.2"
+    "@types/bun": "^1.4.2",
+    "@types/node": "^22.20.2",
+    "esbuild": "0.28.2",
+    "typescript": "^7.0.2"
   }
 }

@@ -27,6 +27,14 @@ import {
 } from "@inquirer/prompts"
 
 import {
+  isProbeTimeoutResult,
+  probeTimeoutMessage,
+  resolveCatalogCwd,
+  resolveDiscoveryCandidate,
+  SUBPROCESS_PROBE_TIMEOUT_MS,
+} from "../installer/path-security.mjs"
+
+import {
   MAX_STEP_LIMIT,
   MIN_STEP_LIMIT,
   normalizeStepLimits,
@@ -160,6 +168,7 @@ function runModelCatalogCommand(
       {
         cwd,
         env: process.env,
+        timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
 
         /*
          * The command itself requires no input.
@@ -206,21 +215,43 @@ function runModelCatalogCommand(
 }
 
 function discoverModels(catalogCwd) {
-  const candidates = [
+  const rawCandidates = [
     process.env.OPENCODE_BIN,
     "opencode",
     "opencode2",
   ].filter(Boolean)
 
-  let binary = null
+  /*
+   * Validate OPENCODE_BIN with the same safe executable-name/path rules
+   * as normal discovery. Unsafe names and relative paths never reach
+   * spawnSync; absolute paths must be a real executable non-directory.
+   * No shell is ever used.
+   */
+  const resolvedCandidates = []
 
-  for (const candidate of [...new Set(candidates)]) {
+  for (const raw of [...new Set(rawCandidates)]) {
+    const resolved =
+      resolveDiscoveryCandidate(raw)
+
+    if (
+      resolved &&
+      !resolvedCandidates.includes(resolved)
+    ) {
+      resolvedCandidates.push(resolved)
+    }
+  }
+
+  let binary = null
+  let timedOutCandidate = null
+
+  for (const candidate of resolvedCandidates) {
     const probe = spawnSync(
       candidate,
       ["--version"],
       {
         encoding: "utf8",
         env: process.env,
+        timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
         stdio: [
           "ignore",
           "pipe",
@@ -228,6 +259,13 @@ function discoverModels(catalogCwd) {
         ],
       },
     )
+
+    if (isProbeTimeoutResult(probe)) {
+      timedOutCandidate =
+        timedOutCandidate ?? candidate
+
+      continue
+    }
 
     if (
       !probe.error &&
@@ -239,6 +277,12 @@ function discoverModels(catalogCwd) {
   }
 
   if (!binary) {
+    if (timedOutCandidate) {
+      throw new Error(
+        probeTimeoutMessage(timedOutCandidate),
+      )
+    }
+
     throw new Error(
       [
         "OpenCode CLI was not found.",
@@ -257,12 +301,21 @@ function discoverModels(catalogCwd) {
    *
    * OpenCode catalogs are location-scoped. We want the user's general
    * available model inventory when configuring this installation.
+   *
+   * An explicitly configured catalog cwd must be an absolute, existing,
+   * real directory (not a symlink or file).
    */
+  const rawConfiguredCwd =
+    catalogCwd ??
+    process.env.OPENCODE_MCP_ORCHESTRATOR_CATALOG_CWD ??
+    null
+
   const cwd =
-    catalogCwd ||
-    process.env.OPENCODE_MCP_ORCHESTRATOR_CATALOG_CWD ||
-    process.env.HOME ||
-    process.cwd()
+    typeof rawConfiguredCwd === "string" &&
+    rawConfiguredCwd.trim() !== ""
+      ? resolveCatalogCwd(rawConfiguredCwd)
+      : process.env.HOME ||
+        process.cwd()
 
   let last
 
@@ -277,6 +330,12 @@ function discoverModels(catalogCwd) {
         cwd,
       )
 
+    if (isProbeTimeoutResult(last.result)) {
+      throw new Error(
+        probeTimeoutMessage(binary),
+      )
+    }
+
     if (last.result.error) {
       throw new Error(
         `failed to execute "${binary} models": ${last.result.error.message}`,
@@ -284,6 +343,14 @@ function discoverModels(catalogCwd) {
     }
 
     if (last.result.status !== 0) {
+      if (attempt < 3) {
+        sleepSync(
+          attempt * 500,
+        )
+
+        continue
+      }
+
       throw new Error(
         [
           `${binary} models exited with status ${last.result.status}`,

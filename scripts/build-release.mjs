@@ -1,4 +1,5 @@
 import {
+  chmodSync,
   cpSync,
   mkdirSync,
   readFileSync,
@@ -15,6 +16,10 @@ import {
   build,
 } from "esbuild"
 
+import {
+  SERVER_VERSION_FALLBACK,
+} from "../bridge/server.mjs"
+
 const root =
   resolve(
     dirname(
@@ -30,6 +35,60 @@ const dist =
     root,
     "dist",
   )
+
+/*
+ * Deterministic artifact modes for dist outputs only.
+ *
+ * Source files are never chmodded; every created directory and every
+ * copied or written public/executable output under dist/ is explicitly
+ * chmodded below so results do not depend on the caller's umask.
+ */
+const DIR_MODE =
+  0o755
+
+const PUBLIC_FILE_MODE =
+  0o644
+
+const EXEC_FILE_MODE =
+  0o755
+
+function chmodOutputDir(path) {
+  chmodSync(
+    path,
+    DIR_MODE,
+  )
+}
+
+function chmodPublicOutput(path) {
+  chmodSync(
+    path,
+    PUBLIC_FILE_MODE,
+  )
+}
+
+function chmodExecutableOutput(path) {
+  chmodSync(
+    path,
+    EXEC_FILE_MODE,
+  )
+}
+
+const pkg =
+  JSON.parse(
+    readFileSync(
+      resolve(
+        root,
+        "package.json",
+      ),
+      "utf8",
+    ),
+  )
+
+const buildVersion =
+  typeof pkg.version === "string" &&
+  pkg.version.trim() !== ""
+    ? pkg.version
+    : SERVER_VERSION_FALLBACK
 
 rmSync(
   dist,
@@ -79,6 +138,22 @@ mkdirSync(
   },
 )
 
+for (
+  const directory
+  of [
+    dist,
+    resolve(dist, "libexec"),
+    resolve(dist, "opencode"),
+    resolve(dist, "opencode/agents"),
+    resolve(dist, "opencode/plugins"),
+    resolve(dist, "opencode/plugins/sandbox-tools"),
+    resolve(dist, "skills"),
+    resolve(dist, "skills/orchestrate"),
+  ]
+) {
+  chmodOutputDir(directory)
+}
+
 const common = {
   bundle: true,
   platform: "node",
@@ -101,6 +176,18 @@ const common = {
   banner: {
     js:
       'import { createRequire as __orchestratorCreateRequire } from "node:module"; const require = __orchestratorCreateRequire(import.meta.url);',
+  },
+
+  /*
+   * Single authoritative build version for the MCP server identity,
+   * written to dist/manifest.json below from the same buildVersion.
+   * The bundled server prefers the installed manifest.json version at
+   * runtime (which carries the final release version after packaging),
+   * falling back to this build-time define, then the source
+   * package.json version, and finally a dev placeholder.
+   */
+  define: {
+    __ORCHESTRATOR_VERSION__: JSON.stringify(buildVersion),
   },
 }
 
@@ -126,6 +213,13 @@ await build({
     ),
 })
 
+chmodPublicOutput(
+  resolve(
+    dist,
+    "libexec/mcp-server.mjs",
+  ),
+)
+
 console.log()
 console.log(
   "Bundling interactive configurator...",
@@ -148,6 +242,13 @@ await build({
     ),
 })
 
+chmodExecutableOutput(
+  resolve(
+    dist,
+    "libexec/configure-models.mjs",
+  ),
+)
+
 console.log()
 console.log(
   "Bundling integration configurator...",
@@ -169,6 +270,13 @@ await build({
       "libexec/configure-integrations.mjs",
     ),
 })
+
+chmodExecutableOutput(
+  resolve(
+    dist,
+    "libexec/configure-integrations.mjs",
+  ),
+)
 
 console.log()
 console.log(
@@ -202,6 +310,13 @@ for (const [source, destination] of installers) {
         destination,
       ),
   })
+
+  chmodExecutableOutput(
+    resolve(
+      dist,
+      destination,
+    ),
+  )
 }
 
 console.log()
@@ -232,6 +347,13 @@ await build({
     ),
 })
 
+chmodPublicOutput(
+  resolve(
+    dist,
+    "opencode/plugins/sandbox-tools/index.ts",
+  ),
+)
+
 console.log()
 console.log(
   "Copying static agent definitions...",
@@ -243,6 +365,7 @@ for (
     "scout",
     "worker",
     "runner",
+    "runner-writable",
   ]
 ) {
   const name =
@@ -255,6 +378,14 @@ for (
       name,
     ),
 
+    resolve(
+      dist,
+      "opencode/agents",
+      name,
+    ),
+  )
+
+  chmodPublicOutput(
     resolve(
       dist,
       "opencode/agents",
@@ -279,23 +410,19 @@ cpSync(
   ),
 )
 
-const pkg =
-  JSON.parse(
-    readFileSync(
-      resolve(
-        root,
-        "package.json",
-      ),
-      "utf8",
-    ),
-  )
+chmodPublicOutput(
+  resolve(
+    dist,
+    "skills/orchestrate/SKILL.md",
+  ),
+)
 
 const manifest = {
   name:
     "opencode-mcp-orchestrator",
 
   version:
-    pkg.version,
+    buildVersion,
 
   formatVersion:
     1,
@@ -349,6 +476,13 @@ writeFileSync(
     null,
     2,
   ) + "\n",
+)
+
+chmodPublicOutput(
+  resolve(
+    dist,
+    "manifest.json",
+  ),
 )
 
 console.log()

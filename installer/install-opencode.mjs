@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -117,6 +118,11 @@ function installManagedFile({
      * Already exactly what we want.
      */
     if (currentHash === sourceHash) {
+      chmodSync(
+        destination,
+        0o644,
+      )
+
       state.files[destination] = {
         sha256: sourceHash,
       }
@@ -149,6 +155,14 @@ function installManagedFile({
       writeFileSync(
         destination,
         content,
+        {
+          mode: 0o644,
+        },
+      )
+
+      chmodSync(
+        destination,
+        0o644,
       )
 
       state.files[destination] = {
@@ -184,6 +198,14 @@ function installManagedFile({
   writeFileSync(
     destination,
     content,
+    {
+      mode: 0o644,
+    },
+  )
+
+  chmodSync(
+    destination,
+    0o644,
   )
 
   state.files[destination] = {
@@ -317,6 +339,22 @@ const files = [
   },
 
   {
+    role: "runner",
+
+    source:
+      resolve(
+        payload,
+        "opencode/agents/opencode-orchestrator-runner-writable.md",
+      ),
+
+    destination:
+      resolve(
+        opencodeConfig,
+        "agents/opencode-orchestrator-runner-writable.md",
+      ),
+  },
+
+  {
     source:
       resolve(
         payload,
@@ -379,6 +417,11 @@ writeFileSync(
   {
     mode: 0o600,
   },
+)
+
+chmodSync(
+  statePath,
+  0o600,
 )
 
 console.log()

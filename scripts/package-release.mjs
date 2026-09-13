@@ -4,14 +4,18 @@ import {
   chmodSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs"
 
 import {
+  basename,
   dirname,
+  relative,
   resolve,
 } from "node:path"
 
@@ -35,6 +39,130 @@ const root =
     here,
     "..",
   )
+
+/*
+ * Deterministic artifact modes for release/staging outputs only.
+ *
+ * Source files (including the private config/config.local.json) are never
+ * chmodded or copied; every created staging directory and every copied or
+ * written public/executable output under release/.staging and release/ is
+ * explicitly chmodded below so archive entries do not depend on umask.
+ * tar preserves these filesystem modes in the release archive.
+ */
+const DIR_MODE =
+  0o755
+
+const PUBLIC_FILE_MODE =
+  0o644
+
+const EXEC_FILE_MODE =
+  0o755
+
+const EXECUTABLE_PAYLOAD_FILES =
+  new Set([
+    "install.sh",
+    "libexec/setup.mjs",
+    "libexec/install-core.mjs",
+    "libexec/install-opencode.mjs",
+    "libexec/install-codex.mjs",
+    "libexec/install-claude.mjs",
+    "libexec/doctor.mjs",
+    "libexec/uninstall.mjs",
+    "libexec/configure-models.mjs",
+    "libexec/configure-integrations.mjs",
+  ])
+
+function chmodStagingDir(path) {
+  chmodSync(
+    path,
+    DIR_MODE,
+  )
+}
+
+function chmodPublicStagingFile(path) {
+  chmodSync(
+    path,
+    PUBLIC_FILE_MODE,
+  )
+}
+
+function chmodExecutableStagingFile(path) {
+  chmodSync(
+    path,
+    EXEC_FILE_MODE,
+  )
+}
+
+/*
+ * Private local state must never enter the release payload, even if it
+ * ever appears inside dist/. The forbidden-content scan below stays as the
+ * fail-closed backstop; this filter keeps such files out of the copy.
+ */
+function stagingCopyFilter(source) {
+  const base =
+    basename(source)
+
+  if (
+    base === "node_modules" ||
+    base === "config.local.json" ||
+    base === ".env"
+  ) {
+    return false
+  }
+
+  return true
+}
+
+function normalizeStagingModes(payload) {
+  function visit(path) {
+    const status =
+      lstatSync(path)
+
+    if (status.isSymbolicLink()) {
+      return
+    }
+
+    if (status.isDirectory()) {
+      chmodSync(
+        path,
+        DIR_MODE,
+      )
+
+      for (const entry of readdirSync(path)) {
+        visit(
+          resolve(
+            path,
+            entry,
+          ),
+        )
+      }
+
+      return
+    }
+
+    if (status.isFile()) {
+      const relativePath =
+        relative(
+          payload,
+          path,
+        ).split("\\").join("/")
+
+      if (EXECUTABLE_PAYLOAD_FILES.has(relativePath)) {
+        chmodSync(
+          path,
+          EXEC_FILE_MODE,
+        )
+      } else {
+        chmodSync(
+          path,
+          PUBLIC_FILE_MODE,
+        )
+      }
+    }
+  }
+
+  visit(payload)
+}
 
 function parseArgs(argv) {
   const result = {
@@ -182,6 +310,10 @@ mkdirSync(
   },
 )
 
+chmodStagingDir(staging)
+
+chmodStagingDir(payload)
+
 cpSync(
   dist,
   payload,
@@ -189,6 +321,7 @@ cpSync(
     recursive: true,
     dereference: false,
     preserveTimestamps: true,
+    filter: stagingCopyFilter,
   },
 )
 
@@ -221,6 +354,8 @@ writeFileSync(
     2,
   ) + "\n",
 )
+
+chmodPublicStagingFile(manifestPath)
 
 /*
  * Manual/offline installation entrypoint.
@@ -258,10 +393,7 @@ writeFileSync(
   installScript,
 )
 
-chmodSync(
-  installPath,
-  0o755,
-)
+chmodExecutableStagingFile(installPath)
 
 /*
  * Ship the public documentation with the archive when present.
@@ -285,8 +417,24 @@ for (const name of [
         name,
       ),
     )
+
+    chmodPublicStagingFile(
+      resolve(
+        payload,
+        name,
+      ),
+    )
   }
 }
+
+/*
+ * Normalize staging modes before archiving so tar entries carry the
+ * intended executable/public modes regardless of umask. tar preserves
+ * these filesystem modes in the release archive.
+ */
+normalizeStagingModes(payload)
+
+chmodStagingDir(staging)
 
 /*
  * Refuse to package accidental development/runtime state.
@@ -387,6 +535,11 @@ writeFileSync(
   checksumResult.stdout,
 )
 
+chmodSync(
+  checksumFile,
+  0o644,
+)
+
 const bootstrapScript =
   resolve(
     release,
@@ -407,6 +560,11 @@ run(
     "--output",
     bootstrapScript,
   ],
+)
+
+chmodSync(
+  bootstrapScript,
+  0o755,
 )
 
 rmSync(

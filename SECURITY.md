@@ -40,11 +40,16 @@ The intended delegated-command properties are:
 ### Runner
 
 - may execute local commands required to inspect/test/build the workspace
-- ordinary workspace behavior follows the Runner sandbox policy
+- `read_only` (default) uses a read-only workspace: commands cannot create
+  build, cache, coverage, or other workspace files
+- `writable` must be explicitly selected and uses a separate
+  permission-scoped agent
 - `.git` metadata remains protected
 - outbound command network access is disabled
 - large command output is persisted and analyzed inside the delegated flow
   rather than copied wholesale into the parent context
+- persisted Runner logs may contain command output; see
+  docs/orchestration-friction.md for retention and access modes
 
 ## Provider credentials
 
@@ -62,7 +67,15 @@ They should never be placed:
 
 Worker and Runner are not intended to perform Git-mutating operations.
 
-The sandbox protects Git metadata from structured and shell-based writes.
+Prevention: the sandbox mounts Git metadata read-only and structured tool
+permissions deny Git paths, while delegated shells have no outbound network
+and no host credential or home-directory access.
+
+Detection only: Runner and worker flows also report a Git status delta
+before/after execution. That report observes workspace changes; it does not
+prevent writable-mode workspace edits. A caller-side timeout may leave the
+delegated session running, so check Git status after any delegated
+infrastructure timeout rather than assuming no edits occurred.
 
 The parent coding agent remains responsible for commits, rebases, resets,
 branch operations, and similar repository-state changes.
@@ -126,7 +139,42 @@ This project does not claim protection against:
 Checksum verification protects against accidental corruption and mismatched
 release assets. It is not equivalent to cryptographic publisher signing.
 
+The release SPDX SBOM (`opencode-mcp-orchestrator-${VERSION}.spdx.json`) is
+unsigned and is published without provenance or attestation. `SHA256SUMS`
+provides SHA-256 integrity checking for the release archive; it is not
+signing or provenance.
+
 Future releases may add signed artifacts or provenance/attestation.
+
+## Dependency audit status
+
+As of 2026-09-12, `npm audit` reports 11 moderate, 0 high, and
+0 critical findings.
+
+- Advisory: GHSA-8988-4f7v-96qf, OpenTelemetry Core unbounded memory
+  allocation in W3C Baggage propagation, affecting
+  `@opentelemetry/core` <2.8.0.
+- Dependency path: `@opencode/plugin` -> `@opencode/util` ->
+  OpenTelemetry packages.
+- `npm audit` reports `fixAvailable:false` for this dependency graph,
+  so there is no available fix without changing the upstream
+  dependency range.
+
+This is recorded as a dependency availability risk, not a confirmed
+exploit in this repository. No claim is made that the affected
+Baggage propagation behavior is reachable or exploitable through this
+repository's use of `@opencode/plugin`.
+
+Policy for this finding:
+
+- Do not apply forced overrides or `npm audit fix --force` to work
+  around the upstream range.
+- Monitor upstream `@opencode/plugin` for a release that moves past
+  the affected OpenTelemetry range, then rerun `npm audit`.
+- Release/CI handling: fail on high/critical findings and report
+  moderate advisories where the workflow already provides an audit
+  step. No workflow was changed in this task to add or enforce such a
+  step; current workflows do not include an `npm audit` gate.
 
 ## Reporting a vulnerability
 
