@@ -62,6 +62,76 @@ export const SANDBOX_RUN_RETENTION_COUNT_MAX = 200
 
 const SHELL_MAX_OUTPUT = 30000
 
+export const ORCHESTRATOR_AGENT_PREFIX =
+  "opencode-orchestrator-"
+
+export const MUSE_SPARK_MODEL_PREFIX =
+  "muse-spark-"
+
+/*
+ * OpenCode Console/Zen may route consecutive Muse Spark requests through
+ * different upstream callers. Replaying the previous response's encrypted
+ * reasoning state then fails with `encrypted_content was not issued to this
+ * caller`. Delegated sessions do not need hidden reasoning history to preserve
+ * their visible text and tool transcript, so remove only reasoning parts from
+ * orchestrator-owned Muse requests before OpenCode lowers the next provider
+ * request. Other agents, providers, and models remain untouched.
+ */
+export function stripUnreplayableMuseReasoning(input: {
+  agent?: unknown
+  model?: {
+    providerID?: unknown
+    id?: unknown
+  }
+  messages?: Array<{
+    readonly role?: unknown
+    readonly content?: ReadonlyArray<{ readonly type?: unknown }>
+  }>
+}): number {
+  if (
+    typeof input.agent !== "string" ||
+    !input.agent.startsWith(ORCHESTRATOR_AGENT_PREFIX) ||
+    input.model?.providerID !== "opencode" ||
+    typeof input.model?.id !== "string" ||
+    !input.model.id.startsWith(MUSE_SPARK_MODEL_PREFIX) ||
+    !Array.isArray(input.messages)
+  ) {
+    return 0
+  }
+
+  let removed = 0
+
+  for (const [index, message] of input.messages.entries()) {
+    if (
+      message.role !== "assistant" ||
+      !Array.isArray(message.content)
+    ) {
+      continue
+    }
+
+    let messageRemoved = 0
+
+    const retained = message.content.filter((part) => {
+      if (part?.type !== "reasoning") {
+        return true
+      }
+
+      removed += 1
+      messageRemoved += 1
+      return false
+    })
+
+    if (messageRemoved > 0) {
+      input.messages[index] = {
+        ...message,
+        content: retained,
+      }
+    }
+  }
+
+  return removed
+}
+
 export function resolveSandboxIntEnv(
   name: string,
   defaultValue: number,
@@ -1386,6 +1456,14 @@ export default Plugin.define({
       retentionMs: setupLimits.runnerRetentionMs,
       maxRuns: setupLimits.runnerRetentionCount,
     })
+
+    await ctx.session.hook(
+      "context",
+      (input) => {
+        stripUnreplayableMuseReasoning(input)
+      },
+      { providerID: "opencode" },
+    )
 
     await ctx.tool.transform((editor) => {
       editor.add({

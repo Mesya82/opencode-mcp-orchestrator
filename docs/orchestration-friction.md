@@ -22,11 +22,87 @@ probe but is not yet proven for the observed five-minute host boundary.
 After any delegated infrastructure timeout, check Git status and diff before
 assuming nothing changed. Do not assume timeout means no edits.
 
+### Configured caller-budget preflight
+
+The bridge now rejects an operation before writer-lock acquisition, client
+initialization, or session creation when its actual operation timeout plus the
+40-second cleanup/result reserve does not fit within the configured parent MCP
+timeout. This includes the global bridge-timeout compatibility override.
+Runner commands retain their separate inner check, so the required nesting is:
+
+```text
+command timeout + 60s <= operation timeout
+operation timeout + 40s <= configured parent timeout
+```
+
+This check uses configured limits. The MCP SDK supplies an `AbortSignal`, but
+not a reliable live request deadline, so preflight cannot detect an
+undocumented host-side ceiling such as the observed roughly five-minute wait.
+Keep host-specific profiles below a separately proven host deadline.
+
+### Writable cleanup quarantine
+
+Worker and writable Runner calls now share a per-canonical-worktree lifecycle:
+
+```text
+free -> active -> cleaning -> free
+                  |
+                  +-> quarantined
+```
+
+The worktree becomes free only when `session.remove` resolves successfully
+within the cleanup deadline. A removal exception or timeout quarantines the
+worktree, makes the originating writable call report an actionable quarantine
+error, and blocks later writable delegation. If timeout or cancellation wins
+before session creation finishes, the original error retains its timeout or
+cancellation detail and also reports quarantine; late creation remains
+quarantined until the background reconciliation confirms removal. Scout and
+read-only Runner calls do not consult writer state.
+
+Quarantine is deliberately in-memory and has no force-clear API. Before
+restarting the bridge to clear it, inspect Git status and the focused diff and
+verify that no orphaned session is still changing the worktree. A removal that
+finishes only after its cleanup deadline does not itself clear quarantine.
+
 ## Provider compatibility
 
 Observed: a Console provider rejected a non-`auto` `tool_choice` request with
 `invalid_request_error` (`only "auto" is supported for tool_choice`), surfaced
 as a session failure.
+
+On 2026-09-13, Muse Spark through OpenCode Console/Zen also rejected continued
+tool-using sessions with `reasoning encrypted_content was not issued to this
+caller` ([upstream issue #48741](https://github.com/anomalyco/opencode/issues/48741)).
+The upstream failure occurs when encrypted reasoning returned by one
+Console caller is replayed to a different upstream caller. The installed
+orchestrator plugin now removes reasoning parts only from subsequent context
+requests for `opencode-orchestrator-*` agents using `opencode/muse-spark-*`.
+Visible assistant text, tool calls, and tool results remain intact. Other
+agents, providers, and models are not modified, and there is no automatic model
+or paid-provider fallback.
+
+After installing the rebuilt plugin with the active Extended configuration, a
+live Worker probe completed separate file reads, an isolated shell command, and
+final synthesis with `LIVE_WORKER_ENCRYPTED_REASONING_FIX_PASS`.
+
+### Tracked upstream issue: Muse encrypted reasoning replay
+
+- Issue: [anomalyco/opencode#48741](https://github.com/anomalyco/opencode/issues/48741),
+  `Opencode Zen critical errors on Muse Spark family when model recieves a
+  image/does a tool call`.
+- Status checked: open on 2026-09-13.
+- Affected orchestrator path: multi-step `opencode/muse-spark-*` Scout, Worker,
+  or Runner sessions after a reasoning response is followed by tool use.
+- Observed local error: `invalid_request_error` with
+  `reasoning encrypted_content was not issued to this caller`.
+- Local mitigation: strip hidden reasoning parts only from subsequent
+  orchestrator-owned Muse context requests; retain visible text and tool
+  history; never fall back to another model or paid API.
+- Tracking action: recheck the issue and run the live Worker probe when
+  upgrading OpenCode or changing the Muse model route.
+- Removal criteria: upstream confirms a fix, the installed OpenCode version
+  contains it, and the live multi-tool Worker regression passes with the hook
+  disabled. Do not remove the workaround based only on an issue closure.
 
 Verify that the selected provider and OpenCode version are compatible. Do not
 silently fall back to another model or retry the same broad prompt without
@@ -81,9 +157,11 @@ follow-up inspection with `sandbox_log`:
 ## After a timeout
 
 1. Check `git status` and the focused diff for the delegated worktree.
-2. Treat an empty diff as possibly correct only after checking the requested
+2. If writable delegation reports quarantine, verify that no orphaned session
+   remains before restarting the bridge; restart is the recovery boundary.
+3. Treat an empty diff as possibly correct only after checking the requested
    resulting state.
-3. Report the concrete timeout, what was checked, and any continued-session
+4. Report the concrete timeout, what was checked, and any continued-session
    edits found.
 
 ## Upstream audit finding with no available fix

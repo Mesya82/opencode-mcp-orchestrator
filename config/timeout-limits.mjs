@@ -26,6 +26,18 @@ export const MAX_PARENT_TIMEOUT_SECONDS = 7200
 export const MIN_PARENT_RESERVE_SECONDS = 60
 export const RUNNER_COMMAND_RESERVE_SECONDS = 60
 
+/*
+ * Configured caller-budget preflight reserves. The operation timeout plus
+ * this reserve must fit within the configured parent timeout so interrupt,
+ * session removal, and structured result handling can complete before the
+ * caller stops waiting. The total stays within the existing 60-second
+ * parent reserve so every currently valid profile remains compatible.
+ */
+export const CALLER_CLEANUP_RESERVE_SECONDS = 30
+export const CALLER_RESULT_RESERVE_SECONDS = 10
+export const CALLER_BUDGET_RESERVE_SECONDS =
+  CALLER_CLEANUP_RESERVE_SECONDS + CALLER_RESULT_RESERVE_SECONDS
+
 function validateInteger(value, minimum, maximum, label) {
   if (
     !Number.isInteger(value) ||
@@ -169,6 +181,52 @@ export function assertRunnerTimeoutFits(
   ) {
     throw new Error(
       `Runner command timeout ${commandTimeoutSeconds}s does not fit within the ${operationTimeoutSeconds}s Runner operation timeout with the required ${RUNNER_COMMAND_RESERVE_SECONDS}s synthesis and cleanup reserve`,
+    )
+  }
+}
+
+/*
+ * Nesting for synchronous delegation:
+ *   Runner command timeout fits Runner operation timeout
+ *     (assertRunnerTimeoutFits, with RUNNER_COMMAND_RESERVE_SECONDS);
+ *   operation timeout fits configured parent/caller budget
+ *     (assertOperationTimeoutFitsParent, with CALLER_BUDGET_RESERVE_SECONDS).
+ *
+ * This enforces only the configured parent budget. The bridge context
+ * exposes an MCP request AbortSignal but no reliable live host deadline,
+ * so this validator must not be described as knowing an MCP host's live
+ * deadline.
+ */
+export function assertOperationTimeoutFitsParent(
+  operationTimeoutSeconds,
+  parentTimeoutSeconds,
+  operation = "operation",
+  caller = "configured parent",
+) {
+  if (
+    !Number.isInteger(operationTimeoutSeconds) ||
+    operationTimeoutSeconds < 1
+  ) {
+    throw new Error(
+      "Operation timeout must be a positive integer number of seconds",
+    )
+  }
+
+  if (
+    !Number.isInteger(parentTimeoutSeconds) ||
+    parentTimeoutSeconds < 1
+  ) {
+    throw new Error(
+      "Parent timeout must be a positive integer number of seconds",
+    )
+  }
+
+  if (
+    operationTimeoutSeconds + CALLER_BUDGET_RESERVE_SECONDS >
+      parentTimeoutSeconds
+  ) {
+    throw new Error(
+      `${operation} operation timeout ${operationTimeoutSeconds}s does not fit within the ${caller} budget ${parentTimeoutSeconds}s with the required ${CALLER_BUDGET_RESERVE_SECONDS}s cleanup and result reserve`,
     )
   }
 }

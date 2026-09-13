@@ -42,6 +42,13 @@ resolve to Standard.
 
 `opencode/plugins/sandbox-tools/`
 
+The installed plugin also registers a narrowly scoped session-context hook for
+orchestrator-owned OpenCode Muse Spark sessions. It removes hidden reasoning
+parts before a subsequent provider request so Console/Zen does not receive
+encrypted reasoning issued to a different upstream caller. Text and tool
+history remain available to the delegated agent; other agents and models are
+unchanged.
+
 Provides the structured sandbox tools required by Worker and Runner.
 
 ### Model and step-limit configurator

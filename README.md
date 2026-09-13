@@ -189,6 +189,30 @@ Runner command timeouts must leave at least 60 seconds inside the Runner
 operation deadline for analysis, synthesis, and cleanup. Impossible
 combinations fail before an OpenCode session is created.
 
+The bridge also enforces a configured caller-budget preflight on every
+operation: the actual operation timeout (including
+`OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS` or a test `timeoutMs`
+override) plus a 40-second cleanup and result reserve (30 seconds cleanup,
+10 seconds result) must fit within the configured parent timeout. The
+check runs before writer-lock acquisition and before any session or client
+work, and its error names the concrete operation, caller budget, and
+reserve without echoing prompts or config secrets. It enforces only the
+configured parent budget; the SDK context exposes an MCP request
+`AbortSignal` but no reliable live host deadline.
+
+Writable work is fail-closed per canonical worktree with states
+`active`, `cleaning`, and `quarantined`. A second worker or writable
+runner cannot start while any of those states is present. The state moves
+through `cleaning` on success, error, timeout, or cancellation, and is
+cleared only after `session.remove` is confirmed within the cleanup
+deadline. A throw or timeout during removal quarantines the directory with
+an actionable restart-and-verify error on the originating writable call. A
+timeout or cancellation before
+session creation also quarantines until late-session reconciliation
+confirms removal, at which point it may clear. Quarantine is in-memory
+and clears on process restart; there is no force-clear API in this batch.
+Scout and read-only runner paths never consult writer state.
+
 When Codex integration is selected, installation writes the profile's parent
 deadline to `mcp_servers.opencode-agents.tool_timeout_sec` in Codex
 `config.toml`. An existing Extended step profile without `timeoutLimits`
@@ -265,6 +289,17 @@ The installer adds:
     ~/.config/opencode/plugins/opencode-mcp-orchestrator/index.ts
 
 Equivalent XDG paths are used when `XDG_CONFIG_HOME` is set.
+
+For orchestrator-owned sessions using OpenCode Console/Zen Muse Spark models,
+the plugin omits hidden reasoning parts from subsequent provider requests. This
+avoids replaying caller-bound encrypted reasoning state that Console may reject
+after tool use. Visible text and tool history are retained. The workaround is
+scoped to `opencode-orchestrator-*` agents with `opencode/muse-spark-*`; it does
+not alter ordinary OpenCode sessions or silently select another provider.
+The upstream defect is tracked as
+[anomalyco/opencode#48741](https://github.com/anomalyco/opencode/issues/48741);
+see `docs/orchestration-friction.md` for status, validation, and workaround
+removal criteria.
 
 ## Codex integration
 

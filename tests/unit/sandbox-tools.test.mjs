@@ -31,6 +31,7 @@ import {
   SANDBOX_SHELL_TIMEOUT_MS_MIN,
   SANDBOX_TOOLCHAIN_DIRS_ENV,
   SANDBOX_RUN_INPUT_PROPERTY_NAMES,
+  stripUnreplayableMuseReasoning,
   addAbsoluteWorktreeBind,
   addSandboxToolchainBinds,
   assertRunnerRootStat,
@@ -56,6 +57,78 @@ import {
   sandboxRunInputSchema,
   validateRunID,
 } from "../../opencode/plugins/sandbox-tools/index.ts"
+
+test("Muse orchestrator contexts drop unreplayable reasoning only", () => {
+  const messages = [
+    {
+      role: "assistant",
+      content: [
+        {
+          type: "reasoning",
+          text: "hidden",
+          encrypted: "opaque-provider-state",
+        },
+        { type: "text", text: "visible" },
+        { type: "tool-call", id: "call_1", name: "read", input: {} },
+      ],
+    },
+    {
+      role: "tool",
+      content: [
+        {
+          type: "tool-result",
+          id: "call_1",
+          name: "read",
+          result: { type: "text", value: "result" },
+        },
+      ],
+    },
+  ]
+
+  assert.equal(
+    stripUnreplayableMuseReasoning({
+      agent: "opencode-orchestrator-worker",
+      model: {
+        providerID: "opencode",
+        id: "muse-spark-1.3-contributor-free",
+      },
+      messages,
+    }),
+    1,
+  )
+
+  assert.deepEqual(
+    messages[0].content.map((part) => part.type),
+    ["text", "tool-call"],
+  )
+  assert.equal(messages[1].content[0].type, "tool-result")
+
+  for (const input of [
+    {
+      agent: "ordinary-user-agent",
+      model: { providerID: "opencode", id: "muse-spark-1.3-contributor-free" },
+    },
+    {
+      agent: "opencode-orchestrator-worker",
+      model: { providerID: "other", id: "muse-spark-1.3-contributor-free" },
+    },
+    {
+      agent: "opencode-orchestrator-worker",
+      model: { providerID: "opencode", id: "different-model" },
+    },
+  ]) {
+    const untouched = [{
+      role: "assistant",
+      content: [{ type: "reasoning", text: "keep" }],
+    }]
+
+    assert.equal(
+      stripUnreplayableMuseReasoning({ ...input, messages: untouched }),
+      0,
+    )
+    assert.equal(untouched[0].content.length, 1)
+  }
+})
 
 function fakeStat(overrides = {}) {
   return {

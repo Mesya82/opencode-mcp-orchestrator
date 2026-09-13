@@ -28,6 +28,7 @@ import {
 } from "./config.mjs"
 
 import {
+  assertOperationTimeoutFitsParent,
   assertRunnerTimeoutFits,
   normalizeConfigTimeoutLimits,
 } from "../config/timeout-limits.mjs"
@@ -139,18 +140,29 @@ export const MAX_BRIDGE_TIMEOUT_MS = 3_600_000
 /*
  * Upper bound for best-effort session cleanup (interrupt/remove) so a
  * wedged service cannot hold a bridge operation open indefinitely.
+ * Tests may narrow this bound with overrides.cleanupTimeoutMs so hanging
+ * removal can be covered without waiting the full production deadline.
  */
 const SESSION_CLEANUP_TIMEOUT_MS = 10_000
 
 let clientPromise
 
 /*
- * Canonical directories with a writer currently in flight (worker or
- * writable runner). The lock is keyed per worktree so unrelated
- * worktrees never block each other. Scout and read-only runner
- * operations never consult this set.
+ * Per-canonical-directory writer state for worker and writable runner work:
+ *   free (absent) -> active -> cleaning -> free
+ *                                     \-> quarantined
+ * `active` means a writable operation is executing, `cleaning` means
+ * interrupt/removal has started, and `quarantined` means termination could
+ * not be confirmed. New writable operations fail closed for every
+ * non-free state. The map is in-memory only and clears on process restart.
+ * There is no public force-clear API in this batch. Scout and read-only
+ * runner operations never consult this map.
  */
-const activeWriterDirectories = new Set()
+const writerDirectoryStates = new Map()
+
+function writerQuarantineMessage(directory) {
+  return `writable operation directory is quarantined for ${directory} after unconfirmed session cleanup; inspect Git status and the focused diff, verify no orphaned session remains, then restart the bridge process and retry`
+}
 
 export function configPath() {
   if (process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG) {
@@ -443,17 +455,46 @@ export async function getClient(overrides = {}) {
 }
 
 function acquireWriterLock(directory) {
-  if (activeWriterDirectories.has(directory)) {
+  const existing = writerDirectoryStates.get(directory)
+
+  if (existing) {
+    if (existing.status === "quarantined") {
+      throw new Error(writerQuarantineMessage(directory))
+    }
+
+    if (existing.status === "cleaning") {
+      throw new Error(
+        `writable operation cleanup is still in progress for ${directory}; wait for confirmed session removal and retry`
+      )
+    }
+
     throw new Error(
-      `worker is already running for ${directory}; wait for it to finish and retry`
+      `writable operation is already running for ${directory}; wait for it to finish and retry`
     )
   }
 
-  activeWriterDirectories.add(directory)
+  writerDirectoryStates.set(directory, { status: "active" })
 }
 
-function releaseWriterLock(directory) {
-  activeWriterDirectories.delete(directory)
+function markWriterCleaning(directory) {
+  const existing = writerDirectoryStates.get(directory)
+
+  if (existing && existing.status === "active") {
+    existing.status = "cleaning"
+  }
+}
+
+function clearWriterState(directory) {
+  writerDirectoryStates.delete(directory)
+}
+
+function quarantineWriter(directory, sessionID) {
+  writerDirectoryStates.set(
+    directory,
+    sessionID
+      ? { status: "quarantined", sessionID }
+      : { status: "quarantined" },
+  )
 }
 
 /*
@@ -462,7 +503,7 @@ function releaseWriterLock(directory) {
  */
 export function resetBridgeStateForTests() {
   clientPromise = undefined
-  activeWriterDirectories.clear()
+  writerDirectoryStates.clear()
 }
 
 function settleWithin(promise, ms) {
@@ -486,14 +527,34 @@ function settleWithin(promise, ms) {
   })()
 }
 
-async function cleanupSession(client, sessionID, succeeded) {
+async function resolveConfiguredParentTimeoutSeconds(overrides = {}) {
+  if (overrides.parentTimeoutSeconds !== undefined) {
+    return overrides.parentTimeoutSeconds
+  }
+
+  const config = await configuredBridgeConfig()
+  const timeouts =
+    config.timeoutLimits?.limits
+      ? config.timeoutLimits
+      : normalizeConfigTimeoutLimits(config)
+
+  return timeouts.parentTimeoutSeconds
+}
+
+async function cleanupSession(client, sessionID, succeeded, options = {}) {
   /*
    * Only interrupt/abort and remove/delete calls supported by the
    * installed @opencode/client are used here: session.interrupt stops
    * in-flight model work after failures, and session.remove deletes the
    * session on every path (including success). Cleanup never receives
-   * the operation AbortSignal and never throws.
+   * the operation AbortSignal and never throws. Removal is confirmed
+   * only when session.remove resolves successfully within the cleanup
+   * deadline; a throw or timeout leaves removeConfirmed false so the
+   * caller can quarantine the worktree fail-closed.
    */
+  const cleanupTimeoutMs =
+    options.cleanupTimeoutMs ?? SESSION_CLEANUP_TIMEOUT_MS
+
   if (!succeeded) {
     await settleWithin(
       (async () => {
@@ -503,20 +564,42 @@ async function cleanupSession(client, sessionID, succeeded) {
           // Best effort only.
         }
       })(),
-      SESSION_CLEANUP_TIMEOUT_MS,
+      cleanupTimeoutMs,
     )
   }
 
-  await settleWithin(
-    (async () => {
+  let removeConfirmed = false
+  let timer
+
+  try {
+    const removeOutcome = (async () => {
       try {
         await client.session.remove({ sessionID })
+        return "removed"
       } catch {
-        // Best effort only.
+        return "failed"
       }
-    })(),
-    SESSION_CLEANUP_TIMEOUT_MS,
-  )
+    })()
+
+    const timeoutOutcome = new Promise((innerResolve) => {
+      timer = setTimeout(() => innerResolve("timeout"), cleanupTimeoutMs)
+
+      if (typeof timer.unref === "function") {
+        timer.unref()
+      }
+    })
+
+    const outcome = await Promise.race([
+      removeOutcome,
+      timeoutOutcome,
+    ])
+
+    removeConfirmed = outcome === "removed"
+  } finally {
+    clearTimeout(timer)
+  }
+
+  return { removeConfirmed }
 }
 
 export async function runAgent(directoryArg, task, agent, role, overrides = {}) {
@@ -540,6 +623,25 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       Math.floor(timeoutMs / 1000),
     )
   }
+
+  /*
+   * Configured caller-budget preflight: the actual operation timeout
+   * (including OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS and test
+   * overrides) plus cleanup/result reserve must fit within the configured
+   * parent timeout. This runs before writer-lock acquisition and before
+   * any session/client work. It enforces only the configured parent
+   * budget; the SDK context exposes no reliable live host deadline.
+   */
+  const operationTimeoutSeconds = Math.ceil(timeoutMs / 1000)
+  const parentTimeoutSeconds =
+    await resolveConfiguredParentTimeoutSeconds(overrides)
+
+  assertOperationTimeoutFitsParent(
+    operationTimeoutSeconds,
+    parentTimeoutSeconds,
+    `${role} (${agent})`,
+    "configured parent",
+  )
 
   const takesWriterLock =
     role === "worker" ||
@@ -613,32 +715,56 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
   let succeeded = false
   let sessionClient = overrides.client ?? null
   let cleanupAttempted = false
+  let cleanupResult = null
   let work
+  let result
+  let operationError
+  let quarantineError
 
   /*
-   * Exactly-once best-effort session cleanup. The outer finally runs it
+   * Exactly-once confirmed session cleanup. The outer finally runs it
    * promptly when the timeout or cancellation wins the race; the
    * background hook below guarantees it when the operation itself
    * settles later (including a session created after the timeout
    * already fired). Cleanup never receives the operation AbortSignal
-   * and never throws.
+   * and never throws. Removal confirmation decides whether a writer
+   * worktree is freed or quarantined fail-closed.
    */
   const cleanupOnce = async () => {
     if (cleanupAttempted) {
-      return
+      return cleanupResult
     }
 
     if (!sessionID || !sessionClient) {
-      return
+      return null
     }
 
     cleanupAttempted = true
 
-    await cleanupSession(
+    cleanupResult = await cleanupSession(
       sessionClient,
       sessionID,
       succeeded,
+      { cleanupTimeoutMs: overrides.cleanupTimeoutMs },
     )
+
+    return cleanupResult
+  }
+
+  const reconcileLateWriter = async () => {
+    const result = await cleanupOnce()
+
+    if (result?.removeConfirmed === true) {
+      const current = writerDirectoryStates.get(directory)
+
+      if (
+        current &&
+        (current.status === "quarantined" ||
+          current.status === "cleaning")
+      ) {
+        clearWriterState(directory)
+      }
+    }
   }
 
   try {
@@ -736,21 +862,19 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       })
     })()
 
-    const result = await Promise.race([
+    result = await Promise.race([
       work,
       timeoutPromise,
       cancelPromise,
     ])
 
     succeeded = true
-
-    return result
   } catch (error) {
     /*
      * Delegated failures must never echo the prompt back to MCP
      * clients: redact it before the error leaves the bridge.
      */
-    throw redactPromptFromError(error, task)
+    operationError = redactPromptFromError(error, task)
   } finally {
     clearTimeout(timer)
 
@@ -765,6 +889,10 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       )
     }
 
+    if (takesWriterLock) {
+      markWriterCleaning(directory)
+    }
+
     await cleanupOnce()
 
     /*
@@ -776,16 +904,55 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
      * handled, and cleanupOnce never throws.
      */
     if (work) {
-      work.then(
-        () => cleanupOnce(),
-        () => cleanupOnce(),
-      )
+      if (takesWriterLock) {
+        work.then(
+          () => reconcileLateWriter(),
+          () => reconcileLateWriter(),
+        )
+      } else {
+        work.then(
+          () => cleanupOnce(),
+          () => cleanupOnce(),
+        )
+      }
     }
 
     if (takesWriterLock) {
-      releaseWriterLock(directory)
+      const confirmed = cleanupResult?.removeConfirmed === true
+
+      if (confirmed) {
+        clearWriterState(directory)
+      } else if (sessionID) {
+        quarantineWriter(directory, sessionID)
+        quarantineError = new Error(writerQuarantineMessage(directory))
+      } else if (runController.signal.aborted) {
+        /*
+         * Timeout or cancellation won before session creation completed.
+         * A late session may still appear; stay quarantined until the
+         * late reconciliation above confirms removal.
+         */
+        quarantineWriter(directory)
+        quarantineError = new Error(writerQuarantineMessage(directory))
+      } else {
+        clearWriterState(directory)
+      }
     }
   }
+
+  if (operationError) {
+    if (quarantineError) {
+      operationError.message =
+        `${operationError.message}; ${quarantineError.message}`
+    }
+
+    throw operationError
+  }
+
+  if (quarantineError) {
+    throw quarantineError
+  }
+
+  return result
 }
 
 /*

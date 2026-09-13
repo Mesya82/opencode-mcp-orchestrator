@@ -77,6 +77,13 @@ prevent writable-mode workspace edits. A caller-side timeout may leave the
 delegated session running, so check Git status after any delegated
 infrastructure timeout rather than assuming no edits occurred.
 
+The bridge also blocks a second Worker or writable Runner for the same
+canonical worktree until session removal is confirmed. Unconfirmed removal
+quarantines that worktree in memory and makes the originating writable call
+fail with an actionable quarantine error; it does not undo, merge, or approve
+any partial edits. Before restarting the bridge to clear quarantine, inspect
+Git status and the focused diff and verify that no orphaned session remains.
+
 The parent coding agent remains responsible for commits, rebases, resets,
 branch operations, and similar repository-state changes.
 

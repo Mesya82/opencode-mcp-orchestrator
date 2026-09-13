@@ -32,7 +32,7 @@ import {
   resolveBridgeTimeoutMs,
   resolveCanonicalCwd,
   resolveServerVersion,
-  runAgent,
+  runAgent as runAgentWithConfiguredBudget,
   SERVER_VERSION_FALLBACK,
 } from "../../bridge/server.mjs"
 import {
@@ -45,6 +45,24 @@ const stubModel = {
   reference: "provider/model",
   providerID: "provider",
   id: "model",
+}
+
+/*
+ * Runtime unit tests inject their caller budget so they do not depend on a
+ * developer-machine config file. Tests for production config loading call
+ * runAgentWithConfiguredBudget directly.
+ */
+function runAgent(directory, task, agent, role, overrides = {}) {
+  return runAgentWithConfiguredBudget(
+    directory,
+    task,
+    agent,
+    role,
+    {
+      parentTimeoutSeconds: 7200,
+      ...overrides,
+    },
+  )
 }
 
 function makeFakeClient(hooks = {}) {
@@ -129,7 +147,7 @@ function callNames(calls, name) {
 async function waitFor(condition, timeoutMs = 5000) {
   const start = Date.now()
 
-  while (!condition()) {
+  while (!(await condition())) {
     if (Date.now() - start > timeoutMs) {
       throw new Error("timed out waiting for test condition")
     }
@@ -644,12 +662,13 @@ test("scout and runner calls never take the writer lock", async () => {
   resetBridgeStateForTests()
 })
 
-test("a timed-out worker releases its worktree lock", async () => {
+test("a timed-out worker with unconfirmed removal quarantines its worktree", async () => {
   resetBridgeStateForTests()
 
   await withTempDir("bridge-writer-timeout-", async (dir) => {
     const hanging = makeFakeClient({
       wait: () => new Promise(() => {}),
+      remove: () => new Promise(() => {}),
     })
 
     await assert.rejects(
@@ -658,12 +677,206 @@ test("a timed-out worker releases its worktree lock", async () => {
         "task",
         "opencode-orchestrator-worker",
         "worker",
-        { client: hanging.client, model: stubModel, timeoutMs: 50 },
+        { client: hanging.client, model: stubModel, timeoutMs: 50, cleanupTimeoutMs: 20 },
       ),
       /timed out/,
     )
 
     const fresh = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: fresh.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(callNames(fresh.calls, "create").length, 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("configured caller-budget preflight rejects before any session or client work", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-preflight-", async (dir) => {
+    const secretTask = "preflight secret task abc123"
+    const { calls, client } = makeFakeClient()
+    let ensured = 0
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        secretTask,
+        "opencode-orchestrator-worker",
+        "worker",
+        {
+          client,
+          model: stubModel,
+          timeoutMs: 200_000,
+          parentTimeoutSeconds: 100,
+        },
+      ),
+      /does not fit/,
+    )
+
+    assert.equal(callNames(calls, "create").length, 0)
+    assert.equal(calls.length, 0)
+
+    const error = await runAgent(
+      dir,
+      secretTask,
+      "opencode-orchestrator-worker",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 200_000,
+        parentTimeoutSeconds: 100,
+      },
+    ).then(
+      () => { throw new Error("should have failed preflight") },
+      (caught) => caught,
+    )
+
+    assert.match(error.message, /worker/)
+    assert.match(error.message, /configured parent/)
+    assert.match(error.message, /cleanup and result reserve/)
+    assert.doesNotMatch(error.message, /preflight secret/)
+    assert.doesNotMatch(error.message, /abc123/)
+
+    // Sanity: a fitting budget with a real fake client still succeeds.
+    const fitting = makeFakeClient()
+    assert.equal(
+      await runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-scout",
+        "scout",
+        { client: fitting.client, model: stubModel, timeoutMs: 5_000, parentTimeoutSeconds: 1_500 },
+      ),
+      "hello",
+    )
+
+    // Oversized bridge env override fails before session creation.
+    const envClient = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        {
+          client: envClient.client,
+          model: stubModel,
+          parentTimeoutSeconds: 60,
+          env: { [BRIDGE_TIMEOUT_ENV_VAR]: "3600000" },
+        },
+      ),
+      /does not fit/,
+    )
+
+    assert.equal(callNames(envClient.calls, "create").length, 0)
+
+    // Preflight happens before client initialization when no client is injected.
+    let ensureCalls = 0
+    const ensureService = async () => {
+      ensureCalls += 1
+      return { url: "http://127.0.0.1:9", auth: undefined }
+    }
+    const makeClient = () => { throw new Error("makeClient must not run after preflight") }
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        {
+          model: stubModel,
+          timeoutMs: 200_000,
+          parentTimeoutSeconds: 100,
+          ensureService,
+          makeClient,
+        },
+      ),
+      /does not fit/,
+    )
+
+    assert.equal(ensureCalls, 0)
+    assert.equal(ensured, 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("configured caller-budget preflight preserves fail-closed config loading", async () => {
+  resetBridgeStateForTests()
+
+  const previous = process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG
+
+  try {
+    await withTempDir("bridge-preflight-config-", async (dir) => {
+      const configFile = join(dir, "config.json")
+
+      await writeFile(
+        configFile,
+        JSON.stringify({
+          version: 1,
+          models: {
+            scout: "provider/model",
+            worker: "provider/model",
+            runner: "provider/model",
+          },
+          timeoutLimits: {
+            profile: "custom",
+            scout: 300,
+            worker: 600,
+            runner: 1200,
+            parent: 1200,
+          },
+        }),
+      )
+
+      process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG = configFile
+
+      const { calls, client } = makeFakeClient()
+
+      await assert.rejects(
+        () => runAgentWithConfiguredBudget(
+          dir,
+          "task",
+          "opencode-orchestrator-worker",
+          "worker",
+          { client, model: stubModel, timeoutMs: 5_000 },
+        ),
+        /invalid timeoutLimits/,
+      )
+
+      assert.equal(calls.length, 0)
+    })
+  } finally {
+    if (previous === undefined) {
+      delete process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG
+    } else {
+      process.env.OPENCODE_MCP_ORCHESTRATOR_CONFIG = previous
+    }
+
+    resetBridgeStateForTests()
+  }
+})
+
+test("writer quarantine frees only after confirmed removal", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-quarantine-free-", async (dir) => {
+    const first = makeFakeClient()
 
     assert.equal(
       await runAgent(
@@ -671,7 +884,326 @@ test("a timed-out worker releases its worktree lock", async () => {
         "task",
         "opencode-orchestrator-worker",
         "worker",
+        { client: first.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      "hello",
+    )
+
+    assert.equal(callNames(first.calls, "remove").length, 1)
+
+    const second = makeFakeClient()
+
+    assert.equal(
+      await runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: second.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      "hello",
+    )
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("writer cleanup state blocks a second writable operation", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-writer-cleaning-", async (dir) => {
+    let releaseRemove
+    const removeGate = new Promise((resolve) => { releaseRemove = resolve })
+    const cleaning = makeFakeClient({
+      remove: () => removeGate,
+    })
+
+    const first = runAgent(
+      dir,
+      "first task",
+      "opencode-orchestrator-worker",
+      "worker",
+      { client: cleaning.client, model: stubModel, timeoutMs: 5000 },
+    )
+
+    await waitFor(() => callNames(cleaning.calls, "remove").length === 1)
+
+    const blocked = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "second task",
+        "opencode-orchestrator-runner-writable",
+        "runner",
+        {
+          client: blocked.client,
+          model: stubModel,
+          timeoutMs: 5000,
+          workspaceAccess: "writable",
+        },
+      ),
+      /cleanup is still in progress/,
+    )
+
+    assert.equal(blocked.calls.length, 0)
+
+    releaseRemove()
+    assert.equal(await first, "hello")
+
+    const recovered = makeFakeClient()
+    assert.equal(
+      await runAgent(
+        dir,
+        "third task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: recovered.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      "hello",
+    )
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("writer remove rejection quarantines the worktree fail-closed", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-quarantine-reject-", async (dir) => {
+    const failing = makeFakeClient({
+      remove: async () => { throw new Error("remove exploded") },
+    })
+
+    // The model work succeeds, but unconfirmed removal makes the overall
+    // writable operation fail closed and report quarantine immediately.
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: failing.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(callNames(failing.calls, "remove").length, 1)
+    const fresh = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
         { client: fresh.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(callNames(fresh.calls, "create").length, 0)
+
+    const quarantineError = await runAgent(
+      dir,
+      "task",
+      "opencode-orchestrator-worker",
+      "worker",
+      { client: fresh.client, model: stubModel, timeoutMs: 5000 },
+    ).then(
+      () => { throw new Error("should have been quarantined") },
+      (caught) => caught,
+    )
+
+    assert.match(quarantineError.message, /quarantined/)
+    assert.match(quarantineError.message, /restart/)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("writer hanging removal quarantines without waiting the full cleanup deadline", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-quarantine-hang-", async (dir) => {
+    const hanging = makeFakeClient({
+      remove: () => new Promise(() => {}),
+    })
+
+    const start = Date.now()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: hanging.client, model: stubModel, timeoutMs: 5000, cleanupTimeoutMs: 20 },
+      ),
+      /quarantined/,
+    )
+
+    const elapsed = Date.now() - start
+    assert.ok(elapsed < 5000, `cleanup bound was not respected: ${elapsed}ms`)
+    assert.equal(callNames(hanging.calls, "remove").length, 1)
+
+    const fresh = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: fresh.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(callNames(fresh.calls, "create").length, 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("late session creation with confirmed removal eventually frees quarantine", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-quarantine-late-", async (dir) => {
+    let releaseCreate
+    const createGate = new Promise((resolve) => { releaseCreate = resolve })
+    const { calls, client } = makeFakeClient({
+      create: async () => {
+        await createGate
+        return { id: "ses_late_writer" }
+      },
+    })
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "late writer task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client, model: stubModel, timeoutMs: 50 },
+      ),
+      /timed out/,
+    )
+
+    const blocked = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "second task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: blocked.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      /already running|quarantined/,
+    )
+
+    assert.equal(callNames(blocked.calls, "create").length, 0)
+
+    releaseCreate()
+
+    await waitFor(() => callNames(calls, "remove").length >= 1)
+
+    const fresh = makeFakeClient()
+
+    await waitFor(async () => {
+      try {
+        assert.equal(
+          await runAgent(
+            dir,
+            "recovered task",
+            "opencode-orchestrator-worker",
+            "worker",
+            { client: fresh.client, model: stubModel, timeoutMs: 5000 },
+          ),
+          "hello",
+        )
+        return true
+      } catch {
+        return false
+      }
+    })
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("worker and writable runner share quarantine while read-only paths stay free", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-quarantine-roles-", async (dir) => {
+    const failing = makeFakeClient({
+      remove: async () => { throw new Error("remove failed") },
+    })
+
+    try {
+      await runAgent(
+        dir,
+        "worker task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: failing.client, model: stubModel, timeoutMs: 5000 },
+      )
+    } catch {
+      // Success with unconfirmed removal still quarantines; ignore outcome.
+    }
+
+    const writableBlocked = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "writable task",
+        "opencode-orchestrator-runner-writable",
+        "runner",
+        { client: writableBlocked.client, model: stubModel, timeoutMs: 5000, workspaceAccess: "writable" },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(callNames(writableBlocked.calls, "create").length, 0)
+
+    const workerBlocked = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "worker task",
+        "opencode-orchestrator-worker",
+        "worker",
+        { client: workerBlocked.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      /quarantined/,
+    )
+
+    // Scout and read-only runner never consult writer quarantine.
+    const scoutClient = makeFakeClient()
+
+    assert.equal(
+      await runAgent(
+        dir,
+        "scout task",
+        "opencode-orchestrator-scout",
+        "scout",
+        { client: scoutClient.client, model: stubModel, timeoutMs: 5000 },
+      ),
+      "hello",
+    )
+
+    const readOnlyClient = makeFakeClient()
+
+    assert.equal(
+      await runAgent(
+        dir,
+        "read-only task",
+        "opencode-orchestrator-runner",
+        "runner",
+        { client: readOnlyClient.client, model: stubModel, timeoutMs: 5000, workspaceAccess: "read_only" },
       ),
       "hello",
     )

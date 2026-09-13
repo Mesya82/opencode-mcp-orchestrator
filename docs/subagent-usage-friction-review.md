@@ -337,9 +337,13 @@ Before changing production defaults, add live and unit coverage for:
    minutes through the freshly installed and restarted Codex integration.
 3. Verify actual Codex app/tool-host and Claude outer deadlines and
    cancellation behavior.
-4. Introduce configured caller budget and reject impossible synchronous
-   timeout combinations.
-5. Add writer quarantine until termination is confirmed.
+4. [Implemented 2026-09-13] Introduce configured parent/caller-budget
+   preflight and reject impossible synchronous timeout combinations. This
+   enforces configured limits only because the MCP context has no live
+   deadline field.
+5. [Implemented 2026-09-13] Add in-memory writer quarantine until session
+   removal is confirmed. Restart recovery requires a Git status/diff and
+   orphan-session check.
 6. Add sandbox toolchain auto-detection and doctor probe.
 7. Add provider capability doctor probe.
 8. Implement asynchronous operation status/cancel for long work.
@@ -348,3 +352,48 @@ Before changing production defaults, add live and unit coverage for:
 Signed release provenance is intentionally deferred. The unsigned SPDX SBOM and
 SHA-256 integrity checks remain in scope; neither is represented as an
 authenticity signature.
+
+## 2026-09-13 batch implementation notes
+
+Actual orchestration friction observed while implementing caller-budget
+preflight and writable quarantine:
+
+- The reconnaissance Scout completed successfully and returned exact runtime,
+  test, and documentation insertion points.
+- The first Worker ran for several minutes and left a focused partial diff, but
+  its final response failed at the provider boundary with
+  `invalid_request_error`: reasoning `encrypted_content` was not issued to this
+  caller. The failure therefore did not prove that its edits or tests were
+  complete.
+- The orchestrator inspected Git status and the focused diff before recovery.
+  A single materially narrower Worker retry failed immediately with the same
+  provider error, after which direct completion required explicit user
+  authorization.
+- The partial unit suite was already green, but integration review found two
+  issues not exposed by that first run: production parent-timeout loading used
+  a catch-all fallback that could mask invalid configuration, and the async
+  test polling helper did not await asynchronous predicates. Direct takeover
+  removed the fallback, isolated runtime tests from developer-local config,
+  and corrected asynchronous polling.
+
+No Scout step-budget or wall-clock failure occurred in this batch. The repeated
+Worker failure was a provider/session-state compatibility fault during response
+generation, not demonstrated model-step exhaustion.
+
+Follow-up root-cause work confirmed the same Muse Spark/Console failure in the
+OpenCode service log and in the active upstream issue. The local mitigation is
+a narrowly scoped OpenCode session-context hook: for orchestrator-owned Muse
+Spark sessions only, hidden reasoning parts are omitted from the next provider
+request so caller-bound encrypted state is not replayed. Visible text and tool
+history are preserved, and no model fallback is introduced. A focused unit test
+covers the exact filtering boundary; live validation requires reinstalling the
+built plugin and restarting the OpenCode service that loaded the prior plugin.
+
+The first deployment command mistakenly used the repository-local config,
+which temporarily rendered Standard agent limits. The mismatch was detected
+from installer output and corrected immediately by reinstalling with the active
+user config; the final installed profile is Extended. The OpenCode watcher
+loaded the updated plugin, and an isolated live Worker probe then completed two
+separate reads, a sandbox-shell action, and final synthesis with
+`LIVE_WORKER_ENCRYPTED_REASONING_FIX_PASS`. This confirms the exact previously
+failing multi-turn tool path without changing the project worktree.
