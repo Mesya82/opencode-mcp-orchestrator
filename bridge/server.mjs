@@ -520,6 +520,14 @@ async function cleanupSession(client, sessionID, succeeded) {
 }
 
 export async function runAgent(directoryArg, task, agent, role, overrides = {}) {
+  /*
+   * Canonicalize and validate before any OpenCode session exists, so
+   * invalid cwd values fail without reading runtime configuration or creating
+   * (or leaking) sessions. Error messages below never interpolate prompt
+   * contents.
+   */
+  const directory = await resolveCanonicalCwd(directoryArg, overrides)
+
   const timeoutMs =
     await resolveOperationTimeoutMs(role, overrides)
 
@@ -532,13 +540,6 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       Math.floor(timeoutMs / 1000),
     )
   }
-
-  /*
-   * Canonicalize and validate before any OpenCode session exists, so
-   * invalid cwd values fail without creating (or leaking) sessions.
-   * Error messages below never interpolate prompt contents.
-   */
-  const directory = await resolveCanonicalCwd(directoryArg, overrides)
 
   const takesWriterLock =
     role === "worker" ||
