@@ -481,6 +481,23 @@ This sends a real provider request and may incur provider usage. Install the
 same configuration first so the managed agent definition and its configured
 step limit match the values read by the live test.
 
+To probe live MCP cancellation through the current source bridge, run:
+
+    npm run build
+    npm run test:live:cancel
+
+This starts a read-only `runner` task (`sleep 60`), aborts it after a short
+delay (`ABORT_DELAY_MS` argument or `OPENCODE_MCP_CANCEL_PROBE_ABORT_MS`,
+default `3000ms`), and passes only when the call rejects promptly as a
+cancellation (under `30000ms`), `tools/list` still works, and
+`git status --porcelain` is unchanged. Success prints
+`LIVE_MCP_CANCELLATION_PASS` with elapsed time; server stderr is printed only
+on failure. This is not part of normal CI because it uses a live provider.
+
+This probes the current source bridge against the currently installed
+OpenCode backend/agent/plugin unless an isolated deployment is explicitly
+supplied (isolated configuration, home directory, and executable path).
+
 ## Releases
 
 Pushing a version tag such as:

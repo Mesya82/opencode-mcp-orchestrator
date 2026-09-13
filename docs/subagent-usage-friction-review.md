@@ -12,11 +12,18 @@ Prompt breadth is not the primary reliability problem. The most important
 problem is that several independent timeout layers do not share one deadline or
 one cancellation contract.
 
-The outer MCP tool call stopped waiting after approximately 300 seconds, while
-the current source defaults the bridge operation timeout to 20 minutes. Some
-delegated sessions continued editing after the caller had already received a
-timeout. This makes a caller timeout an ambiguous state transition rather than
-a completed cancellation.
+The orchestration tool host stopped waiting after approximately 300 seconds,
+while the current source defaults the bridge operation timeout to 20 minutes.
+Some delegated sessions continued editing after the caller had already
+received a timeout. This makes that host timeout an ambiguous state transition
+rather than a completed cancellation.
+
+A live source-bridge probe now establishes the narrower positive result: when
+an MCP client explicitly aborts a request, or when the MCP SDK's request timer
+expires and sends `notifications/cancelled`, the bridge rejects in about three
+seconds, remains responsive to `tools/list`, and leaves a read-only worktree
+unchanged. It does not yet establish that the orchestration tool host's
+observed 300-second boundary sends the same cancellation notification.
 
 During this remediation:
 
@@ -39,26 +46,42 @@ deployment.
 
 | Layer | Current default or observed value | Enforcement point |
 | --- | ---: | --- |
-| External MCP `tools/call` | approximately 300 seconds | caller or MCP host, outside this repository |
+| Orchestration tool host `tools/call` | approximately 300 seconds | host outside this repository; configuration surface not yet identified |
+| Codex CLI per-tool timeout | 60 seconds by default; `mcp_servers.<id>.tool_timeout_sec` is supported | Codex `config.toml` |
 | Bridge operation | 1,200 seconds | `bridge/server.mjs:runAgent()` |
 | Failed-session cleanup | up to 10 seconds for interrupt and 10 seconds for removal | `bridge/server.mjs:cleanupSession()` |
 | Runner command | 900 seconds, accepted range 1-3,600 seconds | delegated `sandbox_run` process timer |
 | Worker verification command | 120 seconds by default, configurable 1-900 seconds | delegated `sandbox_shell` process timer |
 | Code-mode wait interval | 120 seconds | orchestration skill waiting guidance |
 
+The active Codex registration inspected on 2026-09-13 omitted
+`tool_timeout_sec`. The official Codex configuration reference documents a
+60-second default and a per-server override. Older local configuration backups
+contained `tool_timeout_sec = 900`, but the current installer registers the
+server with `codex mcp add` and does not persist a timeout override.
+
 The 20-minute bridge default is internally consistent with a 15-minute Runner
-command, but incompatible with the observed five-minute synchronous caller.
-Both cannot be supported by one synchronous request unless the outer deadline
-can be increased.
+command, but incompatible with an effective five-minute synchronous host. Both
+cannot be supported by one synchronous request unless the effective outer
+deadline can be increased.
 
 ## Confirmed friction points
 
-### 1. Outer timeout is not a cancellation guarantee
+### 1. Cancellation propagation works, but only when the caller sends it
 
 The bridge now accepts an MCP request signal and forwards an `AbortSignal` to
-OpenCode session calls. However, the observed outer timeout did not terminate
-the underlying delegated work. It is not yet proven that the production caller
-sends a cancellation signal when its own deadline expires.
+OpenCode session calls. The live cancellation probe passed twice against the
+source bridge and installed OpenCode backend:
+
+- explicit `AbortController` after 3,000 ms rejected after 3,005 ms;
+- MCP SDK request timeout after 3,000 ms rejected after 3,005 ms.
+
+The SDK request-timeout path sends `notifications/cancelled` before rejecting.
+The server remained responsive and the worktree snapshot did not change in
+both cases. However, the earlier observed 300-second host timeout did not
+terminate the underlying delegated work. It is not yet proven that this host
+sends an MCP cancellation notification when its own deadline expires, and the
+currently running integration was loaded from the older installed deployment.
 
 If the caller disappears without cancellation, cleanup does not begin until
 the much later bridge timeout. Repository writes can continue during that
@@ -141,13 +164,26 @@ session. It should not silently truncate a requested Runner timeout.
 
 ### Option B: increase the outer caller deadline
 
-If every supported parent can configure the MCP call deadline beyond the bridge
-and Runner deadlines, the current synchronous shape can remain. This is the
-smallest code change, but the repository does not currently control or observe
-that deadline. It also leaves poor recovery behavior when transports disappear.
+Codex CLI supports a per-server setting:
 
-This option must be proven independently for Codex and Claude rather than
-assumed from client waiting behavior.
+```toml
+[mcp_servers.opencode-agents]
+tool_timeout_sec = 1800
+```
+
+The exact value must exceed the bridge deadline plus cleanup/result reserve.
+For example, a 30-minute Codex deadline can contain the current 20-minute
+bridge deadline and 15-minute default Runner command. This is a supported
+near-term path for the CLI, according to the
+[official Codex configuration reference](https://developers.openai.com/codex/config-reference).
+
+The repository's installer does not currently preserve this setting when it
+recreates an owned MCP registration, and the observed orchestration host may
+have a separate five-minute cap. It also leaves poor recovery behavior when
+transports disappear.
+
+This option must be proven independently for Codex CLI, the Codex app/tool
+host, and Claude rather than assumed from one client's configuration.
 
 ### Option C: asynchronous operation protocol
 
@@ -295,14 +331,18 @@ Before changing production defaults, add live and unit coverage for:
 ## Implementation order
 
 1. Instrument operation/session lifecycle and create a live cancellation test.
-2. Verify actual Codex and Claude outer deadlines and cancellation behavior.
-3. Introduce configured caller budget and reject impossible synchronous
+2. Add an installer-safe way to preserve/configure Codex
+   `tool_timeout_sec`, then test a call longer than five minutes through the
+   freshly restarted Codex integration.
+3. Verify actual Codex app/tool-host and Claude outer deadlines and
+   cancellation behavior.
+4. Introduce configured caller budget and reject impossible synchronous
    timeout combinations.
-4. Add writer quarantine until termination is confirmed.
-5. Add sandbox toolchain auto-detection and doctor probe.
-6. Add provider capability doctor probe.
-7. Implement asynchronous operation status/cancel for long work.
-8. Isolate writable jobs and integrate patches only after acceptance.
+5. Add writer quarantine until termination is confirmed.
+6. Add sandbox toolchain auto-detection and doctor probe.
+7. Add provider capability doctor probe.
+8. Implement asynchronous operation status/cancel for long work.
+9. Isolate writable jobs and integrate patches only after acceptance.
 
 Signed release provenance is intentionally deferred. The unsigned SPDX SBOM and
 SHA-256 integrity checks remain in scope; neither is represented as an
