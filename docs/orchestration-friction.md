@@ -4,20 +4,26 @@ Operational notes from remediation. Source changes alone do not update an
 installed deployment; rebuild and reinstall (run the installer again) to gain
 fixes. See `README.md` installation and update sections.
 
-## Caller timeout vs bridge timeout
+## Codex timeout vs OpenCode session wait
 
-External MCP callers may time out a tool call after about 300 seconds. That is
-a caller-side wait limit. The delegated OpenCode session can keep running after
-the caller stops waiting and may still edit workspace files.
+The observed approximately 300-second failures were not Codex MCP tool
+timeouts. A fresh Codex process loaded
+`mcp_servers.opencode-agents.tool_timeout_sec = 2100` and a minimal MCP tool
+returned successfully after 330 seconds.
 
-This is different from the bridge-level session timeout and cancellation in
-current source. Standard and Extended timeout profiles select independent
+The same fresh process reproduced the failure through the real orchestrator.
+OpenCode logged HTTP 499 for `POST /api/session/<id>/wait` after about 300.7
+seconds. Its generated client implements that wait as one bare
+`globalThis.fetch` request and wraps the response-header timeout as
+`ClientError("Transport")`.
+
+The bridge now refreshes only the wait request every 240 seconds. An intentional
+refresh does not cancel the delegated session and does not extend the
+bridge-level deadline. Standard and Extended profiles still select independent
 Scout, Worker, and Runner deadlines;
 `OPENCODE_MCP_ORCHESTRATOR_BRIDGE_TIMEOUT_MS` remains a global compatibility
-override. The bridge timeout aborts the operation and attempts best-effort
-session interrupt and removal. Caller timeouts cancel the session only when
-the host sends the MCP cancellation notification; this works in the live SDK
-probe but is not yet proven for the observed five-minute host boundary.
+override. Caller and bridge cancellation still abort the operation and trigger
+best-effort interrupt/removal.
 
 After any delegated infrastructure timeout, check Git status and diff before
 assuming nothing changed. Do not assume timeout means no edits.
@@ -36,9 +42,9 @@ operation timeout + 40s <= configured parent timeout
 ```
 
 This check uses configured limits. The MCP SDK supplies an `AbortSignal`, but
-not a reliable live request deadline, so preflight cannot detect an
-undocumented host-side ceiling such as the observed roughly five-minute wait.
-Keep host-specific profiles below a separately proven host deadline.
+not a reliable live request deadline, so callers still must configure their MCP
+deadline to contain the operation and reserve. The former five-minute symptom
+is handled separately by refreshing OpenCode's internal session wait.
 
 ### Writable cleanup quarantine
 

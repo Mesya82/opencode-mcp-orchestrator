@@ -12,23 +12,24 @@ Prompt breadth is not the primary reliability problem. The most important
 problem is that several independent timeout layers do not share one deadline or
 one cancellation contract.
 
-The orchestration tool host stopped waiting after approximately 300 seconds,
-while the source at the time defaulted the bridge operation timeout to 20
-minutes.
-Some delegated sessions continued editing after the caller had already
-received a timeout. This makes that host timeout an ambiguous state transition
-rather than a completed cancellation.
+Delegated calls repeatedly failed after approximately 300 seconds while the
+source allowed much longer bridge operations. Later isolation proved that the
+Codex MCP timeout was not the failing layer: a fresh Codex process loaded the
+configured 2,100-second timeout and completed a minimal MCP call after 330
+seconds. The failure was OpenCode's single long-running `session.wait()` HTTP
+request, which the generated client issued through bare Node fetch and reported
+as `Transport` when the request closed at the response-header boundary.
 
-A live source-bridge probe now establishes the narrower positive result: when
+A live source-bridge probe established that when
 an MCP client explicitly aborts a request, or when the MCP SDK's request timer
 expires and sends `notifications/cancelled`, the bridge rejects in about three
 seconds, remains responsive to `tools/list`, and leaves a read-only worktree
-unchanged. It does not yet establish that the orchestration tool host's
-observed 300-second boundary sends the same cancellation notification.
+unchanged. The bridge now also refreshes OpenCode's wait request every 240
+seconds without cancelling the session or extending its operation deadline.
 
 During this remediation:
 
-- seven worker invocations ended at the external 300-second boundary;
+- seven worker invocations ended at the OpenCode wait-request boundary;
 - at least four timed-out attempts left observable partial changes;
 - even a checksum-test-only prompt reached the same boundary without producing
   a file;
@@ -47,29 +48,29 @@ deployment.
 
 | Layer | Current default or observed value | Enforcement point |
 | --- | ---: | --- |
-| Orchestration tool host `tools/call` | approximately 300 seconds | host outside this repository; configuration surface not yet identified |
-| Codex CLI per-tool timeout | 60 seconds by default; `mcp_servers.<id>.tool_timeout_sec` is supported | Codex `config.toml` |
+| OpenCode client `session.wait()` HTTP request | approximately 300 seconds before refresh fix | generated client bare Node fetch; server observes HTTP 499 |
+| Codex CLI per-tool timeout | 300 seconds by default; `mcp_servers.<id>.tool_timeout_sec` is supported | Codex `config.toml` |
 | Bridge operation | Standard: Scout 300s, Worker 600s, Runner 1,200s; Extended: 900s/1,500s/1,800s | timeout profile used by `bridge/server.mjs:runAgent()` |
 | Failed-session cleanup | up to 10 seconds for interrupt and 10 seconds for removal | `bridge/server.mjs:cleanupSession()` |
 | Runner command | 900 seconds, accepted range 1-3,600 seconds | delegated `sandbox_run` process timer |
 | Worker verification command | 120 seconds by default, configurable 1-900 seconds | delegated `sandbox_shell` process timer |
 | Code-mode wait interval | 120 seconds | orchestration skill waiting guidance |
 
-The active Codex registration inspected on 2026-09-13 omitted
-`tool_timeout_sec`. The official Codex configuration reference documents a
-60-second default and a per-server override. Older local configuration backups
-contained `tool_timeout_sec = 900`. The timeout-profile implementation now
-persists and verifies this setting after `codex mcp add` recreates the owned
-registration.
+An earlier active Codex registration inspected on 2026-09-13 omitted
+`tool_timeout_sec`. The timeout-profile implementation now persists and
+verifies the setting after `codex mcp add` recreates the owned registration. A
+later fresh-process probe reported `tool_timeout_sec = 2100` and completed a
+minimal 330-second MCP call, proving that the configured Codex layer was not
+the source of the remaining 300-second failure.
 
 The Standard 20-minute Runner operation deadline is internally consistent with
 the 15-minute default Runner command. The Extended profile gives Muse 30
-minutes and configures a 35-minute Codex parent deadline. Neither profile can
-override an independent five-minute application-host ceiling.
+minutes and configures a 35-minute Codex parent deadline. OpenCode wait requests
+are refreshed inside either profile before the HTTP transport boundary.
 
 ## Confirmed friction points
 
-### 1. Cancellation propagation works, but only when the caller sends it
+### 1. Cancellation propagation and bounded wait refresh
 
 The bridge now accepts an MCP request signal and forwards an `AbortSignal` to
 OpenCode session calls. The live cancellation probe passed twice against the
@@ -80,10 +81,10 @@ source bridge and installed OpenCode backend:
 
 The SDK request-timeout path sends `notifications/cancelled` before rejecting.
 The server remained responsive and the worktree snapshot did not change in
-both cases. However, the earlier observed 300-second host timeout did not
-terminate the underlying delegated work. It is not yet proven that this host
-sends an MCP cancellation notification when its own deadline expires, and the
-currently running integration was loaded from the older installed deployment.
+both cases. The separate 300-second failures were OpenCode wait-request
+transport failures, not evidence of an outer caller timeout. An intentional
+240-second refresh aborts only that wait request and immediately reissues it;
+caller or bridge cancellation is never treated as a refresh.
 
 If the caller disappears without cancellation, cleanup does not begin until
 the much later bridge timeout. Repository writes can continue during that
@@ -129,17 +130,16 @@ the parent.
 current source, but requires deployment, configuration, and a positive doctor
 check before it can be trusted operationally.
 
-### 6. Timeout errors lack recovery identity
+### 6. Transport errors lack recovery identity
 
-An outer timeout reports that `tools/call` expired but does not reliably provide
-the OpenCode session ID, current phase, cleanup state, worktree state, or a
-recovery operation. The parent must infer continued activity from later file
-changes.
+A failed wait request reports only `Transport` and does not reliably provide the
+OpenCode session ID, current phase, cleanup state, worktree state, or a recovery
+operation. The parent must infer continued activity from later file changes.
 
 ### 7. Narrow prompts reduce work but do not bound latency
 
 Small validation-only packets were usually successful. Narrow implementation
-packets still occasionally reached 300 seconds. Prompt narrowing is useful
+packets still occasionally reached the wait-request boundary. Prompt narrowing is useful
 routing discipline, but it is not a substitute for cancellation, isolation,
 or an asynchronous execution protocol.
 
@@ -147,9 +147,8 @@ or an asynchronous execution protocol.
 
 ### Option A: short synchronous operations
 
-Define an explicit caller budget in orchestrator configuration and make every
-inner deadline fit inside it. For a confirmed 300-second outer limit, a possible
-budget is:
+Before the OpenCode wait boundary was isolated, one conservative option was to
+fit synchronous work inside an assumed 300-second outer limit:
 
 ```text
 delegated model/session work: 240-260 seconds
@@ -180,9 +179,9 @@ near-term path for the CLI, according to the
 [official Codex configuration reference](https://developers.openai.com/codex/config-reference).
 
 The installer now persists and doctor-checks this setting when it recreates an
-owned Codex MCP registration. The observed orchestration host may still have a
-separate five-minute cap. A longer deadline also leaves poor recovery behavior
-when transports disappear.
+owned Codex MCP registration. A fresh Codex process has proven this configured
+path with a minimal 330-second MCP call. A longer deadline still leaves poor
+recovery behavior when transports disappear.
 
 This option must be proven independently for Codex CLI, the Codex app/tool
 host, and Claude rather than assumed from one client's configuration.
@@ -333,10 +332,11 @@ Before changing production defaults, add live and unit coverage for:
 ## Implementation order
 
 1. Instrument operation/session lifecycle and create a live cancellation test.
-2. Test the configured Codex `tool_timeout_sec` with a call longer than five
-   minutes through the freshly installed and restarted Codex integration.
-3. Verify actual Codex app/tool-host and Claude outer deadlines and
-   cancellation behavior.
+2. [Implemented 2026-09-13] Test configured Codex `tool_timeout_sec` with a
+   minimal 330-second MCP call in a fresh process; it passed with 2,100 seconds
+   loaded.
+3. [Implemented 2026-09-13] Isolate the real 300-second failure to OpenCode's
+   `session.wait()` HTTP request and refresh that wait every 240 seconds.
 4. [Implemented 2026-09-13] Introduce configured parent/caller-budget
    preflight and reject impossible synchronous timeout combinations. This
    enforces configured limits only because the MCP context has no live

@@ -138,6 +138,16 @@ export const MIN_BRIDGE_TIMEOUT_MS = 1_000
 export const MAX_BRIDGE_TIMEOUT_MS = 3_600_000
 
 /*
+ * OpenCode's generated client implements session.wait() as a single HTTP
+ * request using the host Node fetch implementation. Node/Undici can close a
+ * response-header wait at roughly 300 seconds before the bridge operation
+ * deadline. Refresh the long poll comfortably before that transport boundary;
+ * the OpenCode session itself continues running when only the wait request is
+ * aborted.
+ */
+export const SESSION_WAIT_REFRESH_MS = 240_000
+
+/*
  * Upper bound for best-effort session cleanup (interrupt/remove) so a
  * wedged service cannot hold a bridge operation open indefinitely.
  * Tests may narrow this bound with overrides.cleanupTimeoutMs so hanging
@@ -602,6 +612,149 @@ async function cleanupSession(client, sessionID, succeeded, options = {}) {
   return { removeConfirmed }
 }
 
+export async function waitForSessionCompletion(
+  client,
+  sessionID,
+  operationSignal,
+  options = {},
+) {
+  const refreshMs =
+    options.refreshMs ?? SESSION_WAIT_REFRESH_MS
+  const operationStartedAt =
+    options.operationStartedAt ?? Date.now()
+  const operationDeadlineAt =
+    options.operationDeadlineAt ?? Number.POSITIVE_INFINITY
+  const log = options.log ?? debug
+
+  if (!Number.isInteger(refreshMs) || refreshMs < 1) {
+    throw new Error(
+      "session wait refresh must be a positive integer number of milliseconds"
+    )
+  }
+
+  const errorDetails = (error) => {
+    const causeChain = []
+    let cause = error?.cause
+
+    while (cause !== undefined && causeChain.length < 4) {
+      causeChain.push({
+        name: cause?.name ?? typeof cause,
+        ...(cause?.code !== undefined
+          ? { code: String(cause.code) }
+          : {}),
+      })
+      cause = cause?.cause
+    }
+
+    const details = {
+      error_name: error?.name ?? typeof error,
+    }
+
+    if (error?.code !== undefined) {
+      details.error_code = String(error.code)
+    }
+
+    if (causeChain.length > 0) {
+      details.error_cause_chain = causeChain
+    }
+
+    return details
+  }
+
+  let attempt = 0
+
+  while (true) {
+    if (operationSignal?.aborted) {
+      throw (
+        operationSignal.reason instanceof Error
+          ? operationSignal.reason
+          : new Error("OpenCode session wait was aborted")
+      )
+    }
+
+    const attemptStartedAt = Date.now()
+    const remainingMs = operationDeadlineAt - attemptStartedAt
+
+    if (remainingMs <= 0) {
+      throw new Error(
+        `OpenCode session ${sessionID} exceeded its overall operation deadline`
+      )
+    }
+
+    attempt += 1
+
+    const refreshController = new AbortController()
+    const shouldRefresh = remainingMs > refreshMs
+    const signal = operationSignal && shouldRefresh
+      ? AbortSignal.any([
+          operationSignal,
+          refreshController.signal,
+        ])
+      : operationSignal ?? refreshController.signal
+
+    const refreshTimer = shouldRefresh
+      ? setTimeout(
+          () => refreshController.abort(),
+          refreshMs,
+        )
+      : undefined
+
+    if (typeof refreshTimer?.unref === "function") {
+      refreshTimer.unref()
+    }
+
+    try {
+      await client.session.wait(
+        { sessionID },
+        { signal },
+      )
+
+      return
+    } catch (error) {
+      if (
+        operationSignal?.aborted ||
+        !shouldRefresh ||
+        !refreshController.signal.aborted
+      ) {
+        log(JSON.stringify({
+          event: "session_wait_failure",
+          session_id: sessionID,
+          wait_attempt: attempt,
+          elapsed_operation_ms: Date.now() - operationStartedAt,
+          remaining_operation_ms: Math.max(
+            0,
+            operationDeadlineAt - Date.now(),
+          ),
+          reason: operationSignal?.aborted
+            ? "overall_operation_aborted"
+            : "wait_rejected_before_refresh_boundary",
+          ...errorDetails(error),
+        }))
+
+        throw error
+      }
+
+      log(JSON.stringify({
+        event: "session_wait_refresh",
+        session_id: sessionID,
+        wait_attempt: attempt,
+        elapsed_operation_ms: Date.now() - operationStartedAt,
+        remaining_operation_ms: Math.max(
+          0,
+          operationDeadlineAt - Date.now(),
+        ),
+        reason: "bounded_wait_refresh_elapsed",
+        refresh_ms: refreshMs,
+        ...errorDetails(error),
+      }))
+    } finally {
+      if (refreshTimer !== undefined) {
+        clearTimeout(refreshTimer)
+      }
+    }
+  }
+}
+
 export async function runAgent(directoryArg, task, agent, role, overrides = {}) {
   /*
    * Canonicalize and validate before any OpenCode session exists, so
@@ -661,6 +814,8 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
    */
   const runController = new AbortController()
   const externalSignal = overrides.signal ?? undefined
+  const operationStartedAt = Date.now()
+  const operationDeadlineAt = operationStartedAt + timeoutMs
 
   let onExternalAbort = null
 
@@ -705,7 +860,10 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     }
   })
 
-  const timer = setTimeout(onTimeout, timeoutMs)
+  const timer = setTimeout(
+    onTimeout,
+    Math.max(0, operationDeadlineAt - Date.now()),
+  )
 
   if (typeof timer.unref === "function") {
     timer.unref()
@@ -830,11 +988,15 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
         requestOptions,
       )
 
-      await client.session.wait(
+      await waitForSessionCompletion(
+        client,
+        sessionID,
+        requestOptions.signal,
         {
-          sessionID,
+          refreshMs: overrides.sessionWaitRefreshMs,
+          operationStartedAt,
+          operationDeadlineAt,
         },
-        requestOptions,
       )
 
       const raw = await client.session.context(

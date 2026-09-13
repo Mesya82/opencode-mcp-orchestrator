@@ -200,6 +200,13 @@ reserve without echoing prompts or config secrets. It enforces only the
 configured parent budget; the SDK context exposes an MCP request
 `AbortSignal` but no reliable live host deadline.
 
+The OpenCode client implements `session.wait()` as a response-header long
+poll. The bridge refreshes only that HTTP wait request every 240 seconds so
+Node/Undici's approximately 300-second response-header boundary cannot mask a
+still-running session as `Transport`. Refreshes do not interrupt the OpenCode
+session or reset the operation deadline. A failure before the refresh timer, or
+after caller/operation cancellation, remains a real error and is not retried.
+
 Writable work is fail-closed per canonical worktree with states
 `active`, `cleaning`, and `quarantined`. A second worker or writable
 runner cannot start while any of those states is present. The state moves

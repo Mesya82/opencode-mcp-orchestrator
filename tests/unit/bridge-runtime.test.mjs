@@ -34,6 +34,8 @@ import {
   resolveServerVersion,
   runAgent as runAgentWithConfiguredBudget,
   SERVER_VERSION_FALLBACK,
+  SESSION_WAIT_REFRESH_MS,
+  waitForSessionCompletion,
 } from "../../bridge/server.mjs"
 import {
   SUPPORTED_CONFIG_VERSION,
@@ -399,6 +401,237 @@ test("a never-resolving operation terminates within the configured timeout and c
   resetBridgeStateForTests()
 })
 
+test("session wait refreshes before the transport boundary without cancelling the session", async () => {
+  const calls = []
+  const logs = []
+  let waitAttempt = 0
+
+  const client = {
+    session: {
+      wait: async (input, options) => {
+        calls.push([input, options])
+        waitAttempt += 1
+
+        if (waitAttempt > 2) {
+          return
+        }
+
+        await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("Transport", {
+              cause: Object.assign(
+                new Error("bounded request aborted"),
+                { code: "ABORT_ERR" },
+              ),
+            })),
+            { once: true },
+          )
+        })
+      },
+    },
+  }
+
+  const operationController = new AbortController()
+
+  await waitForSessionCompletion(
+    client,
+    "ses_refresh",
+    operationController.signal,
+    {
+      refreshMs: 20,
+      operationStartedAt: Date.now(),
+      operationDeadlineAt: Date.now() + 5000,
+      log: (message) => logs.push(JSON.parse(message)),
+    },
+  )
+
+  assert.equal(calls.length, 3)
+  assert.deepEqual(
+    calls.map(([input]) => input.sessionID),
+    ["ses_refresh", "ses_refresh", "ses_refresh"],
+  )
+  assert.equal(calls[0][1].signal.aborted, true)
+  assert.equal(calls[1][1].signal.aborted, true)
+  assert.equal(calls[2][1].signal.aborted, false)
+  assert.equal(operationController.signal.aborted, false)
+  assert.equal(SESSION_WAIT_REFRESH_MS, 240000)
+  assert.equal(logs.length, 2)
+  assert.deepEqual(
+    logs.map(({ event, session_id, wait_attempt, reason }) => ({
+      event,
+      session_id,
+      wait_attempt,
+      reason,
+    })),
+    [1, 2].map((waitAttempt) => ({
+      event: "session_wait_refresh",
+      session_id: "ses_refresh",
+      wait_attempt: waitAttempt,
+      reason: "bounded_wait_refresh_elapsed",
+    })),
+  )
+  assert.equal(logs[0].error_name, "Error")
+  assert.deepEqual(logs[0].error_cause_chain, [
+    { name: "Error", code: "ABORT_ERR" },
+  ])
+  assert.ok(logs[0].elapsed_operation_ms >= 0)
+  assert.ok(logs[0].remaining_operation_ms > 0)
+})
+
+test("runAgent reissues multiple bounded waits without recreating or reprompting the session", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-wait-refresh-", async (dir) => {
+    let attempts = 0
+    const { calls, client } = makeFakeClient({
+      wait: async (_input, options) => {
+        attempts += 1
+
+        if (attempts > 2) {
+          return
+        }
+
+        await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("Transport")),
+            { once: true },
+          )
+        })
+      },
+    })
+
+    const result = await runAgent(
+      dir,
+      "task",
+      "opencode-orchestrator-scout",
+      "scout",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 5000,
+        sessionWaitRefreshMs: 20,
+      },
+    )
+
+    assert.equal(result, "hello")
+    assert.equal(callNames(calls, "create").length, 1)
+    assert.equal(callNames(calls, "prompt").length, 1)
+    assert.equal(callNames(calls, "wait").length, 3)
+    assert.deepEqual(
+      callNames(calls, "wait").map((call) => call[1].sessionID),
+      ["ses_test", "ses_test", "ses_test"],
+    )
+    assert.equal(callNames(calls, "context").length, 1)
+    assert.equal(callNames(calls, "interrupt").length, 0)
+    assert.equal(callNames(calls, "remove").length, 1)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("session wait does not retry a real transport failure", async () => {
+  let attempts = 0
+  const logs = []
+  const expected = new Error("real transport failure", {
+    cause: Object.assign(
+      new Error("headers timed out"),
+      { code: "UND_ERR_HEADERS_TIMEOUT" },
+    ),
+  })
+  const client = {
+    session: {
+      wait: async () => {
+        attempts += 1
+        throw expected
+      },
+    },
+  }
+
+  await assert.rejects(
+    () => waitForSessionCompletion(
+      client,
+      "ses_failure",
+      new AbortController().signal,
+      {
+        refreshMs: 20,
+        operationDeadlineAt: Date.now() + 5000,
+        log: (message) => logs.push(JSON.parse(message)),
+      },
+    ),
+    (error) => error === expected,
+  )
+
+  assert.equal(attempts, 1)
+  assert.equal(logs.length, 1)
+  assert.equal(logs[0].event, "session_wait_failure")
+  assert.equal(logs[0].reason, "wait_rejected_before_refresh_boundary")
+  assert.deepEqual(logs[0].error_cause_chain, [
+    { name: "Error", code: "UND_ERR_HEADERS_TIMEOUT" },
+  ])
+})
+
+test("wait refreshes do not extend runAgent's absolute operation deadline", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-wait-deadline-", async (dir) => {
+    const { calls, client } = makeFakeClient({
+      wait: async (_input, options) => {
+        await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("Transport")),
+            { once: true },
+          )
+        })
+      },
+    })
+    const startedAt = Date.now()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-scout",
+        "scout",
+        {
+          client,
+          model: stubModel,
+          timeoutMs: 90,
+          sessionWaitRefreshMs: 20,
+        },
+      ),
+      /timed out after 90ms/,
+    )
+
+    assert.ok(Date.now() - startedAt < 1000)
+    assert.equal(callNames(calls, "create").length, 1)
+    assert.equal(callNames(calls, "prompt").length, 1)
+    assert.ok(callNames(calls, "wait").length >= 3)
+    assert.ok(
+      callNames(calls, "wait")
+        .every((call) => call[1].sessionID === "ses_test"),
+    )
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("session wait refresh validates its internal interval", async () => {
+  const client = { session: { wait: async () => {} } }
+
+  await assert.rejects(
+    () => waitForSessionCompletion(
+      client,
+      "ses_invalid",
+      new AbortController().signal,
+      { refreshMs: 0 },
+    ),
+    /positive integer/,
+  )
+})
+
 test("a session created after the timeout still gets cleaned up", async () => {
   resetBridgeStateForTests()
 
@@ -531,6 +764,7 @@ test("external cancellation aborts the operation and still cleans up", async () 
 
     await assert.rejects(() => pending, /was cancelled/)
 
+    assert.equal(callNames(calls, "wait").length, 1)
     assert.equal(callNames(calls, "interrupt").length, 1)
     assert.equal(callNames(calls, "remove").length, 1)
   })

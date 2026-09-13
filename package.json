@@ -16,6 +16,7 @@
     "test:integration": "node --test tests/integration/*.test.mjs",
     "test:live:scout": "node tests/live/mcp-scout-review.mjs dist/libexec/mcp-server.mjs .",
     "test:live:cancel": "node tests/live/mcp-cancel-probe.mjs dist/libexec/mcp-server.mjs .",
+    "test:live:long-runner": "node tests/live/mcp-long-runner-probe.mjs dist/libexec/mcp-server.mjs",
     "test:e2e": "bash tests/e2e/local.sh"
   },
   "dependencies": {
