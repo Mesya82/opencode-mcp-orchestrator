@@ -403,6 +403,12 @@ probe_mcp() {
     "$SERVER"
 }
 
+probe_wait_refresh() {
+  node \
+    /e2e/session-wait-refresh-probe.mjs \
+    "$SERVER"
+}
+
 assert_single_install_layout() {
   test -d "$APP_DATA/current" || \
     fail "current install directory missing"
@@ -494,6 +500,8 @@ assert_state \
   "claude,codex"
 
 probe_mcp
+
+probe_wait_refresh
 
 echo STAGE_3_BOTH_PASS
 
@@ -714,6 +722,7 @@ echo "  real Codex MCP registration"
 echo "  real Claude MCP registration"
 echo "  MCP initialize + tools/list"
 echo "  scout / worker / runner tool contract"
+echo "  installed bundle bounded wait refresh plus progress telemetry"
 echo "  uninstall"
 echo "  OpenCode backend cleanup"
 echo "  preserved user configuration"

@@ -155,6 +155,39 @@ export const SESSION_WAIT_REFRESH_MS = 240_000
 const SESSION_PROGRESS_READ_TIMEOUT_MS = 5_000
 
 /*
+ * Test-only override for the bounded session-wait refresh interval.
+ * Production never sets this variable; the E2E probe uses it to exercise
+ * the refresh path deterministically against the installed bundle.
+ */
+export const OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS =
+  "OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS"
+
+export function resolveSessionWaitRefreshMs(env = process.env) {
+  const raw =
+    env?.[OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS]
+
+  if (
+    raw === undefined ||
+    raw === null ||
+    String(raw).trim() === ""
+  ) {
+    return SESSION_WAIT_REFRESH_MS
+  }
+
+  const parsed = Number(String(raw).trim())
+
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > SESSION_WAIT_REFRESH_MS
+  ) {
+    return SESSION_WAIT_REFRESH_MS
+  }
+
+  return parsed
+}
+
+/*
  * Upper bound for best-effort session cleanup (interrupt/remove) so a
  * wedged service cannot hold a bridge operation open indefinitely.
  * Tests may narrow this bound with overrides.cleanupTimeoutMs so hanging
@@ -1313,7 +1346,9 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
         sessionID,
         requestOptions.signal,
         {
-          refreshMs: overrides.sessionWaitRefreshMs,
+          refreshMs:
+            overrides.sessionWaitRefreshMs ??
+            resolveSessionWaitRefreshMs(overrides.env ?? process.env),
           operationStartedAt,
           operationDeadlineAt,
         },
