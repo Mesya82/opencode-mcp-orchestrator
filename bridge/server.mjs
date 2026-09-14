@@ -138,6 +138,19 @@ export const MIN_BRIDGE_TIMEOUT_MS = 1_000
 export const MAX_BRIDGE_TIMEOUT_MS = 3_600_000
 
 /*
+ * Diagnostic-only switch. When enabled, delegated OpenCode sessions are
+ * interrupted after unsuccessful operations but are deliberately not removed,
+ * so their messages and runtime metadata remain available for inspection.
+ * This is intentionally an environment flag rather than user configuration.
+ */
+export const PRESERVE_SESSIONS_ENV_VAR =
+  "OPENCODE_MCP_ORCHESTRATOR_PRESERVE_SESSIONS"
+
+export function resolvePreserveSessions(env = process.env) {
+  return String(env?.[PRESERVE_SESSIONS_ENV_VAR] ?? "").trim() === "1"
+}
+
+/*
  * OpenCode's generated client implements session.wait() as a single HTTP
  * request using the host Node fetch implementation. Node/Undici can close a
  * response-header wait at roughly 300 seconds before the bridge operation
@@ -167,18 +180,38 @@ let clientPromise
 /*
  * Per-canonical-directory writer state for worker and writable runner work:
  *   free (absent) -> active -> cleaning -> free
+ *                                     \-> preserved
  *                                     \-> quarantined
  * `active` means a writable operation is executing, `cleaning` means
- * interrupt/removal has started, and `quarantined` means termination could
- * not be confirmed. New writable operations fail closed for every
- * non-free state. The map is in-memory only and clears on process restart.
- * There is no public force-clear API in this batch. Scout and read-only
- * runner operations never consult this map.
+ * interrupt/removal has started, `preserved` means diagnostic preservation
+ * intentionally kept the OpenCode session, and `quarantined` means normal
+ * termination/removal could not be confirmed. New writable operations fail
+ * closed for every non-free state. The map is in-memory only and clears on
+ * process restart. Scout and read-only runner operations never consult it.
  */
 const writerDirectoryStates = new Map()
 
 function writerQuarantineMessage(directory) {
   return `writable operation directory is quarantined for ${directory} after unconfirmed session cleanup; inspect Git status and the focused diff, verify no orphaned session remains, then restart the bridge process and retry`
+}
+
+function writerPreservedMessage(directory, sessionID) {
+  const sessionSuffix = sessionID
+    ? `; preserved OpenCode session: ${sessionID}`
+    : ""
+
+  return `writable operation directory is preserved for diagnostics for ${directory}${sessionSuffix}; inspect/export the preserved session, then restart the bridge process before running another writable delegation in this directory`
+}
+
+function diagnosticEvent(event) {
+  /*
+   * stdout is reserved for MCP protocol traffic. Preservation is itself an
+   * explicit diagnostics mode, so emit this identity record even when generic
+   * debug logging is disabled.
+   */
+  console.error(
+    `[opencode-mcp-orchestrator] ${JSON.stringify(event)}`
+  )
 }
 
 export function configPath() {
@@ -475,6 +508,12 @@ function acquireWriterLock(directory) {
   const existing = writerDirectoryStates.get(directory)
 
   if (existing) {
+    if (existing.status === "preserved") {
+      throw new Error(
+        writerPreservedMessage(directory, existing.sessionID)
+      )
+    }
+
     if (existing.status === "quarantined") {
       throw new Error(writerQuarantineMessage(directory))
     }
@@ -503,6 +542,15 @@ function markWriterCleaning(directory) {
 
 function clearWriterState(directory) {
   writerDirectoryStates.delete(directory)
+}
+
+function preserveWriter(directory, sessionID) {
+  writerDirectoryStates.set(
+    directory,
+    sessionID
+      ? { status: "preserved", sessionID }
+      : { status: "preserved" },
+  )
 }
 
 function quarantineWriter(directory, sessionID) {
@@ -696,14 +744,11 @@ async function resolveConfiguredParentTimeoutSeconds(overrides = {}) {
 
 async function cleanupSession(client, sessionID, succeeded, options = {}) {
   /*
-   * Only interrupt/abort and remove/delete calls supported by the
-   * installed @opencode/client are used here: session.interrupt stops
-   * in-flight model work after failures, and session.remove deletes the
-   * session on every path (including success). Cleanup never receives
-   * the operation AbortSignal and never throws. Removal is confirmed
-   * only when session.remove resolves successfully within the cleanup
-   * deadline; a throw or timeout leaves removeConfirmed false so the
-   * caller can quarantine the worktree fail-closed.
+   * session.interrupt stops in-flight model work after unsuccessful operations.
+   * Normal mode then removes the session and confirms deletion. Diagnostic
+   * preservation mode deliberately skips removal so postmortem session state
+   * survives. Cleanup never receives the operation AbortSignal and never
+   * throws.
    */
   const cleanupTimeoutMs =
     options.cleanupTimeoutMs ?? SESSION_CLEANUP_TIMEOUT_MS
@@ -719,6 +764,22 @@ async function cleanupSession(client, sessionID, succeeded, options = {}) {
       })(),
       cleanupTimeoutMs,
     )
+  }
+
+  if (options.preserveSession === true) {
+    const log = options.log ?? diagnosticEvent
+
+    log({
+      event: "session_preserved",
+      session_id: sessionID,
+      succeeded,
+      ...options.metadata,
+    })
+
+    return {
+      removeConfirmed: false,
+      preserved: true,
+    }
   }
 
   let removeConfirmed = false
@@ -752,7 +813,10 @@ async function cleanupSession(client, sessionID, succeeded, options = {}) {
     clearTimeout(timer)
   }
 
-  return { removeConfirmed }
+  return {
+    removeConfirmed,
+    preserved: false,
+  }
 }
 
 export async function waitForSessionCompletion(
@@ -1078,6 +1142,9 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
   const timeoutMs =
     await resolveOperationTimeoutMs(role, overrides)
+  const preserveSession =
+    overrides.preserveSession ??
+    resolvePreserveSessions(overrides.env ?? process.env)
 
   if (
     role === "runner" &&
@@ -1192,13 +1259,12 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
   let quarantineError
 
   /*
-   * Exactly-once confirmed session cleanup. The outer finally runs it
-   * promptly when the timeout or cancellation wins the race; the
-   * background hook below guarantees it when the operation itself
-   * settles later (including a session created after the timeout
-   * already fired). Cleanup never receives the operation AbortSignal
-   * and never throws. Removal confirmation decides whether a writer
-   * worktree is freed or quarantined fail-closed.
+   * Exactly-once session cleanup/preservation. The outer finally runs it
+   * promptly when timeout or cancellation wins the race; the background hook
+   * below guarantees it when the operation itself settles later (including a
+   * session created after the timeout already fired). Normal mode removes the
+   * session. Diagnostic mode interrupts unsuccessful work but preserves the
+   * session for postmortem inspection.
    */
   const cleanupOnce = async () => {
     if (cleanupAttempted) {
@@ -1215,7 +1281,16 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       sessionClient,
       sessionID,
       succeeded,
-      { cleanupTimeoutMs: overrides.cleanupTimeoutMs },
+      {
+        cleanupTimeoutMs: overrides.cleanupTimeoutMs,
+        preserveSession,
+        log: overrides.diagnosticLog,
+        metadata: {
+          role,
+          agent,
+          cwd: directory,
+        },
+      },
     )
 
     return cleanupResult
@@ -1223,6 +1298,11 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
   const reconcileLateWriter = async () => {
     const result = await cleanupOnce()
+
+    if (result?.preserved === true) {
+      preserveWriter(directory, sessionID)
+      return
+    }
 
     if (result?.removeConfirmed === true) {
       const current = writerDirectoryStates.get(directory)
@@ -1370,12 +1450,9 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     await cleanupOnce()
 
     /*
-     * Guarantee eventual cleanup for a session created after the race
-     * already settled (for example, session creation itself outlived
-     * the timeout): when the background operation settles, cleanupOnce
-     * removes the session unless the prompt attempt above already did.
-     * Handlers are attached, so a late background failure stays
-     * handled, and cleanupOnce never throws.
+     * Guarantee eventual cleanup/preservation for a session created after the
+     * race already settled. Handlers are attached so a late background failure
+     * stays handled, and cleanupOnce never throws.
      */
     if (work) {
       if (takesWriterLock) {
@@ -1393,20 +1470,28 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
     if (takesWriterLock) {
       const confirmed = cleanupResult?.removeConfirmed === true
+      const preserved = cleanupResult?.preserved === true
 
       if (confirmed) {
         clearWriterState(directory)
+      } else if (preserved) {
+        preserveWriter(directory, sessionID)
       } else if (sessionID) {
         quarantineWriter(directory, sessionID)
         quarantineError = new Error(writerQuarantineMessage(directory))
       } else if (runController.signal.aborted) {
         /*
-         * Timeout or cancellation won before session creation completed.
-         * A late session may still appear; stay quarantined until the
-         * late reconciliation above confirms removal.
+         * Timeout or cancellation won before session creation completed. In
+         * preservation mode retain the writer lock without manufacturing a
+         * cleanup failure; late reconciliation will attach the eventual
+         * session id. Normal mode keeps the existing quarantine behavior.
          */
-        quarantineWriter(directory)
-        quarantineError = new Error(writerQuarantineMessage(directory))
+        if (preserveSession) {
+          preserveWriter(directory)
+        } else {
+          quarantineWriter(directory)
+          quarantineError = new Error(writerQuarantineMessage(directory))
+        }
       } else {
         clearWriterState(directory)
       }
