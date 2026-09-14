@@ -38,6 +38,7 @@ import {
   waitForSessionCompletion,
 } from "../../bridge/server.mjs"
 import {
+  normalizeSandboxRuntime,
   SUPPORTED_CONFIG_VERSION,
   validateBridgeConfig,
   validateModelReference,
@@ -2307,6 +2308,483 @@ test("server version comes from the authoritative build version, never a hardcod
 
   assert.ok(server)
   await server.close()
+})
+
+test("bridge config accepts a valid multi-root sandboxRuntime and defaults environment", () => {
+  const config = validBridgeConfig({
+    sandboxRuntime: {
+      trustedRoots: [
+        {
+          root: "/srv/sandbox-alpha",
+          pathEntries: [".", "bin"],
+          environment: {
+            ALPHA_TOOLS: "bin",
+          },
+        },
+        {
+          root: "/opt/sandbox-beta",
+          pathEntries: ["tools/bin"],
+        },
+      ],
+    },
+  })
+
+  const result = validateBridgeConfig(
+    config,
+    { configPath: "/tmp/config.json" },
+  )
+
+  assert.deepEqual(result.sandboxRuntime, {
+    trustedRoots: [
+      {
+        root: "/srv/sandbox-alpha",
+        pathEntries: [".", "bin"],
+        environment: {
+          ALPHA_TOOLS: "bin",
+        },
+      },
+      {
+        root: "/opt/sandbox-beta",
+        pathEntries: ["tools/bin"],
+        environment: {},
+      },
+    ],
+  })
+
+  const direct = normalizeSandboxRuntime(config.sandboxRuntime)
+
+  assert.deepEqual(direct, result.sandboxRuntime)
+})
+
+test("bridge config without sandboxRuntime remains accepted unchanged", () => {
+  const config = validBridgeConfig()
+
+  assert.equal(
+    validateBridgeConfig(config, { configPath: "/tmp/config.json" }),
+    config,
+  )
+  assert.ok(!("sandboxRuntime" in config))
+})
+
+test("bridge config accepts an empty sandboxRuntime trustedRoots list", () => {
+  const result = validateBridgeConfig(
+    validBridgeConfig({ sandboxRuntime: { trustedRoots: [] } }),
+    { configPath: "/tmp/config.json" },
+  )
+
+  assert.deepEqual(result.sandboxRuntime, { trustedRoots: [] })
+})
+
+test("bridge config rejects unknown keys in sandboxRuntime", () => {
+  const topLevel = captureThrownError(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [],
+          extra: true,
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /unknown key.*path "sandboxRuntime\.extra"/,
+  )
+
+  assert.match(topLevel.message, /\/tmp\/config\.json/)
+
+  const entry = captureThrownError(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["bin"],
+              extra: true,
+            },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /unknown key.*path "sandboxRuntime\.trustedRoots\[0\]\.extra"/,
+  )
+
+  assert.match(entry.message, /\/tmp\/config\.json/)
+  assert.doesNotMatch(entry.message, /\/srv\/sandbox-alpha/)
+})
+
+test("bridge config rejects sandboxRuntime with missing fields", () => {
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({ sandboxRuntime: {} }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots"/,
+  )
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            { pathEntries: ["bin"] },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots\[0\]\.root"/,
+  )
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            { root: "/srv/sandbox-alpha" },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots\[0\]\.pathEntries"/,
+  )
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: [],
+            },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots\[0\]\.pathEntries"/,
+  )
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({ sandboxRuntime: [] }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime"/,
+  )
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({ sandboxRuntime: { trustedRoots: "bin" } }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots"/,
+  )
+})
+
+test("bridge config rejects invalid sandboxRuntime roots without echoing values", () => {
+  const secret = "sandbox-root-secret-abc123"
+
+  for (
+    const root
+    of [
+      "",
+      "relative/root",
+      "/",
+      "/srv/../sandbox-escape",
+      `/srv/${secret}/../sandbox-escape`,
+      `/srv/bad\x00root`,
+      "/srv/trailing/",
+      42,
+      null,
+    ]
+  ) {
+    const error = captureThrownError(
+      () => validateBridgeConfig(
+        validBridgeConfig({
+          sandboxRuntime: {
+            trustedRoots: [
+              {
+                root,
+                pathEntries: ["bin"],
+              },
+            ],
+          },
+        }),
+        { configPath: "/tmp/config.json" },
+      ),
+      /path "sandboxRuntime\.trustedRoots\[0\]\.root"/,
+    )
+
+    assert.match(error.message, /\/tmp\/config\.json/)
+    assert.doesNotMatch(error.message, /sandbox-root-secret/)
+    assert.doesNotMatch(error.message, /abc123/)
+  }
+})
+
+test("bridge config rejects invalid sandboxRuntime paths without echoing values", () => {
+  const secret = "sandbox-path-secret-abc123"
+
+  for (
+    const candidate
+    of [
+      "",
+      "/absolute/path",
+      "..",
+      "../escape",
+      "nested/../escape-parent",
+      "bin/",
+      "./bin",
+      `nested/${secret}/../escape-parent`,
+      "bin\x00tool",
+      "a//b",
+      42,
+      null,
+    ]
+  ) {
+    const forPathEntries = captureThrownError(
+      () => validateBridgeConfig(
+        validBridgeConfig({
+          sandboxRuntime: {
+            trustedRoots: [
+              {
+                root: "/srv/sandbox-alpha",
+                pathEntries: [candidate],
+              },
+            ],
+          },
+        }),
+        { configPath: "/tmp/config.json" },
+      ),
+      /path "sandboxRuntime\.trustedRoots\[0\]\.pathEntries\[0\]"/,
+    )
+
+    assert.match(forPathEntries.message, /\/tmp\/config\.json/)
+    assert.doesNotMatch(forPathEntries.message, /sandbox-path-secret/)
+    assert.doesNotMatch(forPathEntries.message, /abc123/)
+
+    const forEnvironment = captureThrownError(
+      () => validateBridgeConfig(
+        validBridgeConfig({
+          sandboxRuntime: {
+            trustedRoots: [
+              {
+                root: "/srv/sandbox-alpha",
+                pathEntries: ["bin"],
+                environment: {
+                  ALPHA_TOOLS: candidate,
+                },
+              },
+            ],
+          },
+        }),
+        { configPath: "/tmp/config.json" },
+      ),
+      /path "sandboxRuntime\.trustedRoots\[0\]\.environment"/,
+    )
+
+    assert.match(forEnvironment.message, /\/tmp\/config\.json/)
+    assert.doesNotMatch(forEnvironment.message, /sandbox-path-secret/)
+    assert.doesNotMatch(forEnvironment.message, /abc123/)
+  }
+
+  assert.ok(
+    validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["."],
+              environment: {
+                ALPHA_ROOT: ".",
+              },
+            },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+  )
+})
+
+test("bridge config rejects invalid sandboxRuntime environment forms", () => {
+  const secret = "sandbox-env-secret-abc123"
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["bin"],
+              environment: [],
+            },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots\[0\]\.environment"/,
+  )
+
+  for (
+    const name
+    of [
+      "lowercase",
+      "1LEADING_DIGIT",
+      "HAS-DASH",
+      "HAS SPACE",
+      "",
+      secret,
+    ]
+  ) {
+    const error = captureThrownError(
+      () => validateBridgeConfig(
+        validBridgeConfig({
+          sandboxRuntime: {
+            trustedRoots: [
+              {
+                root: "/srv/sandbox-alpha",
+                pathEntries: ["bin"],
+                environment: {
+                  [name]: "bin",
+                },
+              },
+            ],
+          },
+        }),
+        { configPath: "/tmp/config.json" },
+      ),
+      /path "sandboxRuntime\.trustedRoots\[0\]\.environment"/,
+    )
+
+    assert.match(error.message, /\/tmp\/config\.json/)
+    assert.doesNotMatch(error.message, /sandbox-env-secret/)
+    assert.doesNotMatch(error.message, /abc123/)
+  }
+})
+
+test("bridge config rejects duplicate sandboxRuntime roots and duplicate path entries", () => {
+  const duplicateRoots = captureThrownError(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["bin"],
+            },
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["tools"],
+            },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /duplicate trusted root.*path "sandboxRuntime\.trustedRoots\[1\]"/,
+  )
+
+  assert.match(duplicateRoots.message, /\/tmp\/config\.json/)
+  assert.doesNotMatch(duplicateRoots.message, /\/srv\/sandbox-alpha/)
+
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["bin", "bin"],
+            },
+          ],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /duplicate path entry.*path "sandboxRuntime\.trustedRoots\[0\]\.pathEntries\[1\]"/,
+  )
+})
+
+test("bridge config rejects duplicate and reserved sandboxRuntime environment keys", () => {
+  const secret = "sandbox-duplicate-abc123"
+
+  const duplicate = captureThrownError(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: [
+            {
+              root: "/srv/sandbox-alpha",
+              pathEntries: ["bin"],
+              environment: {
+                SHARED_TOOLS: "bin",
+              },
+            },
+            {
+              root: "/opt/sandbox-beta",
+              pathEntries: ["tools"],
+              environment: {
+                SHARED_TOOLS: "tools",
+              },
+            },
+          ],
+        },
+      }),
+        { configPath: "/tmp/config.json" },
+    ),
+    /duplicate environment variable name.*path "sandboxRuntime\.trustedRoots\[1\]\.environment"/,
+  )
+
+  assert.doesNotMatch(duplicate.message, /SHARED_TOOLS/)
+  assert.doesNotMatch(duplicate.message, /sandbox-duplicate/)
+
+  for (
+    const name
+    of ["HOME", "PATH", "LANG", "LC_ALL", "PYTHONPYCACHEPREFIX"]
+  ) {
+    const reserved = captureThrownError(
+      () => validateBridgeConfig(
+        validBridgeConfig({
+          sandboxRuntime: {
+            trustedRoots: [
+              {
+                root: "/srv/sandbox-alpha",
+                pathEntries: ["bin"],
+                environment: {
+                  [name]: "bin",
+                },
+              },
+            ],
+          },
+        }),
+        { configPath: "/tmp/config.json" },
+      ),
+      /reserved environment variable name.*path "sandboxRuntime\.trustedRoots\[0\]\.environment"/,
+    )
+
+    assert.match(reserved.message, /\/tmp\/config\.json/)
+    assert.doesNotMatch(reserved.message, new RegExp(name))
+  }
+})
+
+test("bridge config rejects non-object sandboxRuntime entries", () => {
+  assert.throws(
+    () => validateBridgeConfig(
+      validBridgeConfig({
+        sandboxRuntime: {
+          trustedRoots: ["not-an-object"],
+        },
+      }),
+      { configPath: "/tmp/config.json" },
+    ),
+    /path "sandboxRuntime\.trustedRoots\[0\]"/,
+  )
 })
 
 test("bridge config rejects unknown top-level keys", () => {

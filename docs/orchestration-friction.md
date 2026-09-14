@@ -146,17 +146,22 @@ narrowing it.
 ## Sandbox toolchains
 
 The delegated sandbox exposes only the workspace and safe system paths by
-default, so it may not see NVM or other user-installed Node installations.
+default. Inherited PATH entries are canonicalized on every sandbox invocation;
+only entries resolving beneath the already mounted `/usr` tree are retained
+automatically. This makes trusted version-manager aliases into `/usr` visible
+without exposing `/run` or arbitrary home directories.
 
-`OPENCODE_SANDBOX_TOOLCHAIN_DIRS` is an explicit allowlist of exact absolute
-toolchain `bin` directories. Entries are mounted read-only at the same absolute
-path, appended to the sandbox `PATH`, and invalid entries fail closed. Example:
+Other installations are declared through the tool-agnostic `sandboxRuntime`
+configuration. A declaration separates the read-only installation `root` from
+its relative `pathEntries` and optional path-valued `environment`. The plugin
+reloads configuration for every invocation and verifies that canonical PATH
+and environment targets remain contained within their root. Broad system
+roots, pseudo-filesystems, Git metadata, the home root, and common credential
+directories fail closed. No model-controlled input can add a mount or an
+environment variable.
 
-    OPENCODE_SANDBOX_TOOLCHAIN_DIRS="$HOME/.nvm/versions/node/<version>/bin"
-
-The setting takes effect only after the updated plugin is deployed (reinstall
-so the new sandbox plugin is installed); setting the variable without
-redeploying does not change existing installations.
+`OPENCODE_SANDBOX_TOOLCHAIN_DIRS` remains an additive compatibility input. It
+does not replace file-backed runtime configuration.
 
 ## Worker verification shell limit
 

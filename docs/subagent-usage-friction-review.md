@@ -118,7 +118,7 @@ step (`tool_choice: "none"`) when a model exhausted its tool-bearing steps.
 The bridge now surfaces that provider error, but configuration-time model
 discovery still does not prove tool-choice compatibility.
 
-### 5. Verification toolchains are not ready by default
+### 5. Verification toolchain visibility
 
 The sandbox deliberately clears the environment and restricts `PATH`. On this
 host, Node is installed below an FNM-managed version directory and was invisible
@@ -126,9 +126,12 @@ to most delegated verification commands. This caused workers to return static
 inspection instead of executable verification and moved noisy testing back to
 the parent.
 
-`OPENCODE_SANDBOX_TOOLCHAIN_DIRS` provides an explicit read-only allowlist in
-current source, but requires deployment, configuration, and a positive doctor
-check before it can be trusted operationally.
+Current source canonicalizes inherited PATH aliases that resolve beneath the
+already mounted `/usr` tree. Other installations use runtime-reloaded,
+tool-agnostic `sandboxRuntime` declarations with separate read-only roots,
+relative PATH entries, and contained path-valued environment variables.
+`OPENCODE_SANDBOX_TOOLCHAIN_DIRS` remains compatible. A positive live sandbox
+probe is still required before operational readiness can be claimed.
 
 ### 6. Transport errors lack recovery identity
 
@@ -269,14 +272,12 @@ Add an opt-in live doctor check for each configured model that:
 Unknown compatibility should fail closed for writable delegation. Do not
 silently switch models or providers.
 
-## Toolchain improvements
+## Toolchain follow-up
 
-The installer should detect the resolved Node/npm executable directories and
-offer only those exact directories as read-only sandbox toolchain mounts. It
-must not mount all of NVM, FNM, or the user's home directory.
-
-Doctor should then perform a networkless sandbox probe such as `node --version`
-and report Worker and Runner toolchain readiness separately from host readiness.
+The generic trusted-runtime-root model avoids per-tool discovery rules and does
+not mount all of a version manager or the user's home directory. Doctor still
+needs configurable, networkless execution probes and should report Worker and
+Runner readiness separately from host readiness.
 
 ## Observability requirements
 
@@ -344,7 +345,8 @@ Before changing production defaults, add live and unit coverage for:
 5. [Implemented 2026-09-13] Add in-memory writer quarantine until session
    removal is confirmed. Restart recovery requires a Git status/diff and
    orphan-session check.
-6. Add sandbox toolchain auto-detection and doctor probe.
+6. [Partially implemented] Add generic runtime-reloaded trusted roots and
+   canonical `/usr` PATH discovery. Add configurable live Doctor probes.
 7. Add provider capability doctor probe.
 8. Implement asynchronous operation status/cancel for long work.
 9. Isolate writable jobs and integrate patches only after acceptance.

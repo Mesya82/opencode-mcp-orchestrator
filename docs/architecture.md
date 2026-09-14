@@ -42,6 +42,14 @@ resolve to Standard.
 
 `opencode/plugins/sandbox-tools/`
 
+`config/sandbox-runtime.mjs` defines the shared, tool-agnostic trusted-root
+schema used by bridge validation, Doctor, and the bundled plugin. The plugin
+reloads the user configuration for each sandbox invocation, canonicalizes
+system PATH aliases into the existing `/usr` mount, and adds only validated
+read-only runtime roots, contained PATH entries, and contained path-valued
+environment variables. Model-controlled tool input cannot change these
+capabilities.
+
 The installed plugin also registers a narrowly scoped session-context hook for
 orchestrator-owned OpenCode Muse Spark sessions. It removes hidden reasoning
 parts before a subsequent provider request so Console/Zen does not receive

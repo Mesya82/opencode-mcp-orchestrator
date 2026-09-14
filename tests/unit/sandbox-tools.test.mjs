@@ -29,11 +29,13 @@ import {
   SANDBOX_SHELL_TIMEOUT_MS_ENV,
   SANDBOX_SHELL_TIMEOUT_MS_MAX,
   SANDBOX_SHELL_TIMEOUT_MS_MIN,
+  SANDBOX_RUNTIME_CONFIG_ENV,
   SANDBOX_TOOLCHAIN_DIRS_ENV,
   SANDBOX_RUN_INPUT_PROPERTY_NAMES,
   omitUnsupportedMuseFinalToolChoice,
   stripUnreplayableMuseReasoning,
   addAbsoluteWorktreeBind,
+  addSandboxRuntimeBinds,
   addSandboxToolchainBinds,
   assertRunnerRootStat,
   baseSandboxArgs,
@@ -43,6 +45,8 @@ import {
   isSpawnTimeout,
   parseSandboxToolchainEntries,
   pruneRunnerRuns,
+  loadSandboxRuntimeConfig,
+  resolveSandboxRuntimeCapabilities,
   resolveSandboxCwd,
   resolveRunnerLogLimitBytes,
   resolveRunnerRetentionCount,
@@ -53,6 +57,8 @@ import {
   resolveSandboxShellTimeoutMs,
   resolveSandboxToolchainDirs,
   runnerOutputBindArgs,
+  safeSystemPath,
+  sandboxRuntimeConfigPath,
   sandboxLogSpawnOptions,
   sandboxPathWithToolchains,
   sandboxRunInputSchema,
@@ -761,6 +767,12 @@ test("toolchain dangerous, missing, relative, and non-directory entries fail clo
     "/etc",
     "/proc",
     "/dev",
+    "/opt",
+    "/var",
+    "/mnt",
+    "/proc/1",
+    "/sys/kernel",
+    "/etc/ssl",
   ]) {
     assert.throws(
       () => resolveSandboxToolchainDirs(denied),
@@ -811,6 +823,226 @@ test("toolchain duplicates fail closed", () => {
       ),
     /duplicate/,
   )
+})
+
+test("sandbox runtime config is reloaded from the configured path", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-runtime-config-"))
+  const path = join(dir, "config.json")
+  const env = {
+    HOME: "/home/tester",
+    [SANDBOX_RUNTIME_CONFIG_ENV]: path,
+  }
+
+  try {
+    assert.equal(sandboxRuntimeConfigPath(env), path)
+
+    writeFileSync(path, JSON.stringify({
+      sandboxRuntime: {
+        trustedRoots: [{
+          root: "/opt/runtime-one",
+          pathEntries: ["bin"],
+        }],
+      },
+    }))
+
+    assert.equal(
+      loadSandboxRuntimeConfig({ env }).trustedRoots[0].root,
+      "/opt/runtime-one",
+    )
+
+    writeFileSync(path, JSON.stringify({
+      sandboxRuntime: {
+        trustedRoots: [{
+          root: "/opt/runtime-two",
+          pathEntries: ["tools"],
+        }],
+      },
+    }))
+
+    assert.equal(
+      loadSandboxRuntimeConfig({ env }).trustedRoots[0].root,
+      "/opt/runtime-two",
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("sandbox runtime config cannot be loaded from a writable worktree", () => {
+  const worktree = mkdtempSync(join(tmpdir(), "sandbox-runtime-config-wt-"))
+  const path = join(worktree, "config.json")
+  writeFileSync(path, JSON.stringify({
+    sandboxRuntime: { trustedRoots: [] },
+  }))
+
+  try {
+    assert.throws(
+      () => loadSandboxRuntimeConfig({
+        env: {
+          HOME: "/home/tester",
+          [SANDBOX_RUNTIME_CONFIG_ENV]: path,
+        },
+        worktree,
+      }),
+      /invalid sandbox runtime configuration/,
+    )
+  } finally {
+    rmSync(worktree, { recursive: true, force: true })
+  }
+})
+
+test("sandbox runtime capabilities resolve contained roots, paths, and environment", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-runtime-"))
+  const root = join(dir, "installation")
+  const bin = join(root, "bin")
+  const home = join(dir, "home")
+  mkdirSync(bin, { recursive: true })
+  mkdirSync(home)
+
+  try {
+    const capabilities = resolveSandboxRuntimeCapabilities({
+      config: {
+        trustedRoots: [{
+          root,
+          pathEntries: ["bin"],
+          environment: { RUNTIME_HOME: "." },
+        }],
+      },
+      env: { HOME: home },
+    })
+
+    assert.deepEqual(capabilities, {
+      mountRoots: [root],
+      pathEntries: [bin],
+      environment: { RUNTIME_HOME: root },
+    })
+
+    const outside = join(dir, "outside")
+    mkdirSync(outside)
+    symlinkSync(outside, join(root, "escape"))
+
+    assert.throws(
+      () => resolveSandboxRuntimeCapabilities({
+        config: {
+          trustedRoots: [{
+            root,
+            pathEntries: ["escape"],
+            environment: {},
+          }],
+        },
+        env: { HOME: home },
+      }),
+      /escapes its root/,
+    )
+
+    const credentials = join(home, ".ssh")
+    mkdirSync(credentials)
+
+    assert.throws(
+      () => resolveSandboxRuntimeCapabilities({
+        config: {
+          trustedRoots: [{
+            root: credentials,
+            pathEntries: ["."],
+            environment: {},
+          }],
+        },
+        env: { HOME: home },
+      }),
+      /broad sandbox runtime root/,
+    )
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("sandbox runtime binds create only destination parents and read-only roots", () => {
+  const argv = ["--dir", "/home"]
+
+  addSandboxRuntimeBinds(
+    argv,
+    ["/home/tester/toolchains/runtime"],
+  )
+
+  assert.deepEqual(argv, [
+    "--dir", "/home",
+    "--dir", "/home/tester",
+    "--dir", "/home/tester/toolchains",
+    "--ro-bind",
+    "/home/tester/toolchains/runtime",
+    "/home/tester/toolchains/runtime",
+  ])
+})
+
+test("safe system PATH canonicalizes inherited aliases into the mounted usr tree", () => {
+  const canonical = new Map([
+    ["/run/fnm/bin", "/usr/local/share/fnm/runtime/bin"],
+    ["/home/tester/bin", "/home/tester/bin"],
+    ["/usr/local/bin", "/usr/local/bin"],
+    ["/usr/bin", "/usr/bin"],
+  ])
+
+  assert.equal(
+    safeSystemPath({
+      path: "/run/fnm/bin:/home/tester/bin:/usr/bin",
+      realpathSync: (path) => canonical.get(path),
+      statSync: () => ({ isDirectory: () => true }),
+    }),
+    "/usr/local/share/fnm/runtime/bin:/usr/bin:/usr/local/bin",
+  )
+})
+
+test("base sandbox args apply runtime roots without model-controlled input", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-runtime-base-"))
+  const worktree = join(dir, "worktree")
+  const root = join(dir, "runtime")
+  const bin = join(root, "bin")
+  const configPath = join(dir, "config.json")
+  mkdirSync(worktree)
+  mkdirSync(bin, { recursive: true })
+  writeFileSync(configPath, JSON.stringify({
+    sandboxRuntime: {
+      trustedRoots: [{
+        root,
+        pathEntries: ["bin"],
+        environment: { RUNTIME_HOME: "." },
+      }],
+    },
+  }))
+
+  const savedConfig = process.env[SANDBOX_RUNTIME_CONFIG_ENV]
+  const savedToolchains = process.env[SANDBOX_TOOLCHAIN_DIRS_ENV]
+
+  process.env[SANDBOX_RUNTIME_CONFIG_ENV] = configPath
+  delete process.env[SANDBOX_TOOLCHAIN_DIRS_ENV]
+
+  try {
+    const argv = baseSandboxArgs(worktree, "/workspace")
+    const pathIndex = argv.findIndex(
+      (value, index) => value === "--setenv" && argv[index + 1] === "PATH",
+    )
+    const environmentIndex = argv.findIndex(
+      (value, index) => value === "--setenv" && argv[index + 1] === "RUNTIME_HOME",
+    )
+
+    assert.equal(mountFlag(argv, root, root), "--ro-bind")
+    assert.ok(argv[pathIndex + 2].split(delimiter).includes(bin))
+    assert.equal(argv[environmentIndex + 2], root)
+  } finally {
+    if (savedConfig === undefined) {
+      delete process.env[SANDBOX_RUNTIME_CONFIG_ENV]
+    } else {
+      process.env[SANDBOX_RUNTIME_CONFIG_ENV] = savedConfig
+    }
+
+    if (savedToolchains === undefined) {
+      delete process.env[SANDBOX_TOOLCHAIN_DIRS_ENV]
+    } else {
+      process.env[SANDBOX_TOOLCHAIN_DIRS_ENV] = savedToolchains
+    }
+
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 const here = dirname(fileURLToPath(import.meta.url))

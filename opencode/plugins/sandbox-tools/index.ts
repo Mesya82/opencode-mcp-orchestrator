@@ -25,6 +25,11 @@ import {
 } from "node:path"
 import { spawnSync } from "node:child_process"
 
+import {
+  normalizeSandboxRuntime,
+  type SandboxRuntimeConfig,
+} from "../../../config/sandbox-runtime.mjs"
+
 export const RUNNER_ROOT = "/tmp/opencode-runner-runs"
 export const RUNNER_LOG_LIMIT_BYTES =
   128 * 1024 * 1024
@@ -596,27 +601,11 @@ export function addAbsoluteWorktreeBind(
   )
 }
 
-function safeSystemPath(): string {
-  const inherited = (process.env.PATH ?? "")
-    .split(":")
-    .filter(Boolean)
-    .filter(
-      (p) =>
-        p === "/bin" ||
-        p === "/sbin" ||
-        p.startsWith("/usr/"),
-    )
-
-  return [...new Set([
-    ...inherited,
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-  ])].join(":")
-}
-
 export const SANDBOX_TOOLCHAIN_DIRS_ENV =
   "OPENCODE_SANDBOX_TOOLCHAIN_DIRS"
+
+export const SANDBOX_RUNTIME_CONFIG_ENV =
+  "OPENCODE_MCP_ORCHESTRATOR_CONFIG"
 
 const SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT =
   new Set([
@@ -628,10 +617,358 @@ const SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT =
     "/proc",
     "/dev",
     "/bin",
+    "/boot",
     "/sbin",
     "/lib",
     "/lib64",
+    "/media",
+    "/mnt",
+    "/opt",
+    "/root",
+    "/srv",
+    "/var",
   ])
+
+const SANDBOX_RUNTIME_FORBIDDEN_PREFIXES = [
+  "/dev",
+  "/etc",
+  "/proc",
+  "/run",
+  "/sys",
+]
+
+const SANDBOX_RUNTIME_HOME_SENSITIVE_PATHS = [
+  ".agents",
+  ".aws",
+  ".azure",
+  ".claude",
+  ".codex",
+  ".config",
+  ".docker",
+  ".gnupg",
+  ".kube",
+  ".password-store",
+  ".ssh",
+]
+
+type RuntimeTrustedRoot = {
+  root: string
+  pathEntries: string[]
+  environment: Record<string, string>
+}
+
+export type SandboxRuntimeCapabilities = {
+  mountRoots: string[]
+  pathEntries: string[]
+  environment: Record<string, string>
+}
+
+function isWithin(root: string, candidate: string): boolean {
+  const rel = relative(root, candidate)
+
+  return (
+    rel === "" ||
+    (
+      rel !== ".." &&
+      !rel.startsWith(".." + sep) &&
+      !isAbsolute(rel)
+    )
+  )
+}
+
+function isForbiddenRuntimeRoot(
+  canonical: string,
+  home: string | undefined,
+): boolean {
+  if (SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT.has(canonical)) {
+    return true
+  }
+
+  if (
+    SANDBOX_RUNTIME_FORBIDDEN_PREFIXES.some(
+      (prefix) => isWithin(prefix, canonical),
+    ) ||
+    canonical.split(sep).includes(".git")
+  ) {
+    return true
+  }
+
+  const segments = canonical.split(sep)
+
+  if (
+    SANDBOX_RUNTIME_HOME_SENSITIVE_PATHS.some(
+      (sensitive) => segments.includes(sensitive),
+    )
+  ) {
+    return true
+  }
+
+  if (!home) return false
+
+  return (
+    canonical === home ||
+    SANDBOX_RUNTIME_HOME_SENSITIVE_PATHS.some(
+      (relativePath) =>
+        isWithin(resolve(home, relativePath), canonical),
+    )
+  )
+}
+
+export function sandboxRuntimeConfigPath(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const override = env[SANDBOX_RUNTIME_CONFIG_ENV]
+
+  if (override) return override
+
+  const configHome = env.XDG_CONFIG_HOME
+
+  if (configHome) {
+    return join(
+      configHome,
+      "opencode-mcp-orchestrator/config.json",
+    )
+  }
+
+  if (!env.HOME) return undefined
+
+  return join(
+    env.HOME,
+    ".config/opencode-mcp-orchestrator/config.json",
+  )
+}
+
+export function loadSandboxRuntimeConfig(options?: {
+  env?: NodeJS.ProcessEnv
+  worktree?: string
+  readFileSync?: (path: string, encoding: "utf8") => string
+}): SandboxRuntimeConfig {
+  const env = options?.env ?? process.env
+  const path = sandboxRuntimeConfigPath(env)
+
+  if (!path || !existsSync(path)) {
+    return { trustedRoots: [] }
+  }
+
+  try {
+    if (options?.worktree) {
+      const lexicalConfig = resolve(path)
+      const lexicalWorktree = resolve(options.worktree)
+
+      if (isWithin(lexicalWorktree, lexicalConfig)) {
+        throw new Error("sandbox runtime configuration is inside worktree")
+      }
+
+      const canonicalConfig = realpathSync(path)
+      const canonicalWorktree = realpathSync(options.worktree)
+
+      if (isWithin(canonicalWorktree, canonicalConfig)) {
+        throw new Error("sandbox runtime configuration resolves inside worktree")
+      }
+    }
+
+    const read = options?.readFileSync ?? readFileSync
+    const parsed = JSON.parse(read(path, "utf8"))
+
+    return parsed?.sandboxRuntime === undefined
+      ? { trustedRoots: [] }
+      : normalizeSandboxRuntime(parsed.sandboxRuntime)
+  } catch {
+    throw new Error(
+      "invalid sandbox runtime configuration",
+    )
+  }
+}
+
+function canonicalHome(
+  home: string | undefined,
+  realpathFn: (path: string) => string,
+): string | undefined {
+  if (!home) return undefined
+
+  try {
+    return realpathFn(home)
+  } catch {
+    return undefined
+  }
+}
+
+function validateCanonicalRoot(
+  entry: RuntimeTrustedRoot,
+  home: string | undefined,
+  realpathFn: (path: string) => string,
+  statFn: (path: string) => { isDirectory(): boolean },
+): string {
+  let canonical: string
+
+  try {
+    canonical = realpathFn(entry.root)
+  } catch {
+    throw new Error("sandbox runtime root does not exist")
+  }
+
+  let info: { isDirectory(): boolean }
+
+  try {
+    info = statFn(canonical)
+  } catch {
+    throw new Error("sandbox runtime root does not exist")
+  }
+
+  if (!info.isDirectory()) {
+    throw new Error("sandbox runtime root is not a directory")
+  }
+
+  if (isForbiddenRuntimeRoot(
+    canonical,
+    canonicalHome(home, realpathFn),
+  )) {
+    throw new Error("refusing broad sandbox runtime root")
+  }
+
+  return canonical
+}
+
+function resolveContainedRuntimePath(
+  root: string,
+  relativePath: string,
+  kind: "path" | "environment",
+  realpathFn: (path: string) => string,
+  statFn: (path: string) => { isDirectory(): boolean },
+): string {
+  let canonical: string
+
+  try {
+    canonical = realpathFn(resolve(root, relativePath))
+  } catch {
+    throw new Error(`sandbox runtime ${kind} target does not exist`)
+  }
+
+  if (!isWithin(root, canonical)) {
+    throw new Error(`sandbox runtime ${kind} target escapes its root`)
+  }
+
+  if (kind === "path") {
+    let info: { isDirectory(): boolean }
+
+    try {
+      info = statFn(canonical)
+    } catch {
+      throw new Error("sandbox runtime path target does not exist")
+    }
+
+    if (!info.isDirectory()) {
+      throw new Error("sandbox runtime path target is not a directory")
+    }
+  }
+
+  return canonical
+}
+
+export function resolveSandboxRuntimeCapabilities(options?: {
+  config?: SandboxRuntimeConfig
+  env?: NodeJS.ProcessEnv
+  worktree?: string
+  realpathSync?: (path: string) => string
+  statSync?: (path: string) => { isDirectory(): boolean }
+}): SandboxRuntimeCapabilities {
+  const env = options?.env ?? process.env
+  const config = options?.config ?? loadSandboxRuntimeConfig({
+    env,
+    worktree: options?.worktree,
+  })
+  const realpathFn = options?.realpathSync ?? realpathSync
+  const statFn = options?.statSync ?? statSync
+  const mountRoots: string[] = []
+  const pathEntries: string[] = []
+  const environment: Record<string, string> = {}
+  const seenRoots = new Set<string>()
+  const seenPaths = new Set<string>()
+
+  for (const entry of config.trustedRoots) {
+    const root = validateCanonicalRoot(
+      entry,
+      env.HOME,
+      realpathFn,
+      statFn,
+    )
+
+    if (seenRoots.has(root)) {
+      throw new Error("duplicate canonical sandbox runtime root")
+    }
+
+    seenRoots.add(root)
+    mountRoots.push(root)
+
+    for (const relativePath of entry.pathEntries) {
+      const path = resolveContainedRuntimePath(
+        root,
+        relativePath,
+        "path",
+        realpathFn,
+        statFn,
+      )
+
+      if (seenPaths.has(path)) {
+        throw new Error("duplicate canonical sandbox runtime path")
+      }
+
+      seenPaths.add(path)
+      pathEntries.push(path)
+    }
+
+    for (const [name, relativePath] of Object.entries(entry.environment)) {
+      environment[name] = resolveContainedRuntimePath(
+        root,
+        relativePath,
+        "environment",
+        realpathFn,
+        statFn,
+      )
+    }
+  }
+
+  return { mountRoots, pathEntries, environment }
+}
+
+export function safeSystemPath(options?: {
+  path?: string
+  realpathSync?: (path: string) => string
+  statSync?: (path: string) => { isDirectory(): boolean }
+}): string {
+  const realpathFn = options?.realpathSync ?? realpathSync
+  const statFn = options?.statSync ?? statSync
+  const inherited = (options?.path ?? process.env.PATH ?? "")
+    .split(delimiter)
+    .filter(Boolean)
+  const safe: string[] = []
+
+  for (const entry of [
+    ...inherited,
+    "/usr/local/bin",
+    "/usr/bin",
+  ]) {
+    try {
+      const canonical = realpathFn(entry)
+      const info = statFn(canonical)
+
+      if (
+        info.isDirectory() &&
+        (
+          canonical === "/usr" ||
+          canonical.startsWith("/usr/")
+        ) &&
+        !safe.includes(canonical)
+      ) {
+        safe.push(canonical)
+      }
+    } catch {
+      // Ignore missing or inaccessible inherited PATH entries.
+    }
+  }
+
+  return safe.join(delimiter)
+}
 
 export function parseSandboxToolchainEntries(
   raw: string | undefined | null,
@@ -722,13 +1059,7 @@ export function resolveSandboxToolchainDirs(
       )
     }
 
-    if (
-      SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT.has(
-        canonical,
-      ) ||
-      (canonicalHome !== undefined &&
-        canonical === canonicalHome)
-    ) {
+    if (isForbiddenRuntimeRoot(canonical, canonicalHome)) {
       throw new Error(
         `refusing broad sandbox toolchain directory: ${entry}`,
       )
@@ -762,6 +1093,46 @@ export function addSandboxToolchainBinds(
 ): void {
   for (const dir of dirs) {
     argv.push("--ro-bind", dir, dir)
+  }
+}
+
+export function addSandboxRuntimeBinds(
+  argv: string[],
+  roots: string[],
+): void {
+  const existingDirs = new Set<string>()
+
+  for (let index = 0; index + 1 < argv.length; index += 1) {
+    if (argv[index] === "--dir") {
+      existingDirs.add(argv[index + 1]!)
+    }
+  }
+
+  for (const root of roots) {
+    if (
+      root !== "/usr" &&
+      !root.startsWith("/usr/")
+    ) {
+      const missingParents: string[] = []
+      let current = resolve(root, "..")
+
+      while (
+        current !== "/" &&
+        current !== "/home" &&
+        current !== "/tmp" &&
+        !existingDirs.has(current)
+      ) {
+        missingParents.push(current)
+        current = resolve(current, "..")
+      }
+
+      for (const parent of missingParents.reverse()) {
+        argv.push("--dir", parent)
+        existingDirs.add(parent)
+      }
+    }
+
+    argv.push("--ro-bind", root, root)
   }
 }
 
@@ -968,20 +1339,34 @@ export function baseSandboxArgs(
 
   const toolchainDirs =
     resolveSandboxToolchainDirs()
+  const runtime =
+    resolveSandboxRuntimeCapabilities({ worktree })
+  const mountRoots = [...new Set([
+    ...runtime.mountRoots,
+    ...toolchainDirs,
+  ])]
+  const pathEntries = [...new Set([
+    ...runtime.pathEntries,
+    ...toolchainDirs,
+  ])]
 
-  addSandboxToolchainBinds(argv, toolchainDirs)
+  addSandboxRuntimeBinds(argv, mountRoots)
 
   argv.push(
     "--clearenv",
 
     "--setenv", "HOME", "/home/sandbox",
-    "--setenv", "PATH", sandboxPathWithToolchains(safeSystemPath(), toolchainDirs),
+    "--setenv", "PATH", sandboxPathWithToolchains(safeSystemPath(), pathEntries),
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "LC_ALL", "C.UTF-8",
     "--setenv", "PYTHONPYCACHEPREFIX", "/tmp/pycache",
-
-    "--chdir", sandboxCwd,
   )
+
+  for (const [name, value] of Object.entries(runtime.environment)) {
+    argv.push("--setenv", name, value)
+  }
+
+  argv.push("--chdir", sandboxCwd)
 
   return argv
 }

@@ -6,6 +6,14 @@ import {
   normalizeTimeoutLimits,
 } from "../config/timeout-limits.mjs"
 
+export {
+  normalizeSandboxRuntime,
+} from "../config/sandbox-runtime.mjs"
+
+import {
+  normalizeSandboxRuntime,
+} from "../config/sandbox-runtime.mjs"
+
 export const SUPPORTED_CONFIG_VERSION = 1
 
 export const MODEL_ROLES = Object.freeze([
@@ -115,7 +123,8 @@ export function validateBridgeConfig(config, options = {}) {
       key !== "models" &&
       key !== "stepLimits" &&
       key !== "timeoutLimits" &&
-      key !== "integrations"
+      key !== "integrations" &&
+      key !== "sandboxRuntime"
     ) {
       throw new Error(
         `invalid configuration ${label}: unknown key at path "${key}"`,
@@ -188,6 +197,23 @@ export function validateBridgeConfig(config, options = {}) {
     hasNormalizedTimeoutLimits = true
   }
 
+  let normalizedSandboxRuntime
+  let hasNormalizedSandboxRuntime = false
+
+  if (
+    config.sandboxRuntime !== undefined
+  ) {
+    try {
+      normalizedSandboxRuntime = normalizeSandboxRuntime(config.sandboxRuntime)
+    } catch (error) {
+      throw new Error(
+        `invalid configuration ${label}: ${error.message}`,
+      )
+    }
+
+    hasNormalizedSandboxRuntime = true
+  }
+
   if (
     config.integrations !== undefined
   ) {
@@ -223,7 +249,8 @@ export function validateBridgeConfig(config, options = {}) {
 
   if (
     !hasNormalizedStepLimits &&
-    !hasNormalizedTimeoutLimits
+    !hasNormalizedTimeoutLimits &&
+    !hasNormalizedSandboxRuntime
   ) {
     return config
   }
@@ -235,6 +262,9 @@ export function validateBridgeConfig(config, options = {}) {
       : {}),
     ...(hasNormalizedTimeoutLimits
       ? { timeoutLimits: normalizedTimeoutLimits }
+      : {}),
+    ...(hasNormalizedSandboxRuntime
+      ? { sandboxRuntime: normalizedSandboxRuntime }
       : {}),
   }
 }

@@ -414,15 +414,37 @@ The delegated command environment has been designed and tested so that:
 ### Sandbox toolchains
 
 `sandbox_shell` and `sandbox_run` expose only the workspace and safe system
-paths by default. To make a user-installed toolchain available without
-exposing `$HOME`, set `OPENCODE_SANDBOX_TOOLCHAIN_DIRS` to a
-platform-delimited list of absolute toolchain `bin` directories. Each exact
-directory is mounted read-only at the same absolute path and appended to the
-sandbox `PATH`. Invalid entries fail closed.
+paths by default. Inherited `PATH` entries that canonicalize beneath `/usr`
+are retained automatically, so version-manager aliases into the existing
+read-only system tree remain usable without restarting OpenCode.
 
-Example (NVM without mounting all of `~/.nvm`):
+Additional installations use the optional, tool-agnostic `sandboxRuntime`
+configuration. Each trusted root is mounted read-only. `pathEntries` and
+path-valued environment variables are resolved relative to that root and must
+remain inside it:
 
-    OPENCODE_SANDBOX_TOOLCHAIN_DIRS="$HOME/.nvm/versions/node/<version>/bin"
+    {
+      "sandboxRuntime": {
+        "trustedRoots": [
+          {
+            "root": "/opt/example-runtime",
+            "pathEntries": ["bin"],
+            "environment": {
+              "EXAMPLE_HOME": "."
+            }
+          }
+        ]
+      }
+    }
+
+The plugin reloads this file for every sandbox invocation, so changing trusted
+roots does not require reinstalling the orchestrator or restarting the shared
+OpenCode service. Broad system roots, the home root, Git metadata, runtime
+pseudo-filesystems, and common credential directories are rejected. Core
+sandbox variables such as `HOME` and `PATH` cannot be overridden.
+
+`OPENCODE_SANDBOX_TOOLCHAIN_DIRS` remains supported for backward compatibility
+as an additive list of read-only directories that are also appended to PATH.
 
 ### Sandbox resource limits
 

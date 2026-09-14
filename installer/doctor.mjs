@@ -24,6 +24,10 @@ import {
 } from "../config/timeout-limits.mjs"
 
 import {
+  normalizeSandboxRuntime,
+} from "../config/sandbox-runtime.mjs"
+
+import {
   codexConfigPath,
   readCodexMcpToolTimeout,
 } from "./codex-config.mjs"
@@ -192,6 +196,7 @@ for (const relative of [
 let config = null
 let stepLimits = null
 let timeoutLimits = null
+let sandboxRuntime = null
 
 console.log()
 console.log("Configuration")
@@ -276,6 +281,20 @@ if (config) {
   } catch (error) {
     fail(
       `invalid timeout configuration: ${error.message}`,
+    )
+  }
+
+  try {
+    sandboxRuntime = normalizeSandboxRuntime(
+      config.sandboxRuntime ?? { trustedRoots: [] },
+    )
+
+    ok(
+      `sandbox runtime roots: ${sandboxRuntime.trustedRoots.length}`,
+    )
+  } catch (error) {
+    fail(
+      `invalid sandbox runtime configuration: ${error.message}`,
     )
   }
 }
