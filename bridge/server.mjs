@@ -244,10 +244,15 @@ export async function configuredModel(role) {
     )
   }
 
-  return parseModelReference(
+  const model = parseModelReference(
     config.models[role],
     role,
   )
+  const variant = config.modelVariants?.[role]
+
+  return variant === undefined
+    ? model
+    : { ...model, variant }
 }
 
 export async function configuredRoleTimeoutSeconds(role) {
@@ -1246,7 +1251,7 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       const model = overrides.model ?? await configuredModel(role)
 
       debug(
-        `${role}: agent=${agent} model=${model.reference} cwd=${directory}`
+        `${role}: agent=${agent} model=${model.reference}${model.variant ? `#${model.variant}` : ""} cwd=${directory}`
       )
 
       const requestOptions = { signal: runController.signal }
@@ -1280,6 +1285,9 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
           model: {
             providerID: model.providerID,
             id: model.id,
+            ...(model.variant !== undefined
+              ? { variant: model.variant }
+              : {}),
           },
         },
         requestOptions,
