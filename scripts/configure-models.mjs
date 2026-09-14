@@ -56,6 +56,10 @@ import {
   timeoutLimitConfig,
 } from "../config/timeout-limits.mjs"
 
+import {
+  discoverStructuredModelCatalog,
+} from "./structured-model-catalog.mjs"
+
 const MODEL_ROLES = [
   "scout",
   "worker",
@@ -483,38 +487,36 @@ function discoverModels(catalogCwd) {
 
   /*
    * Prefer OpenCode's structured catalog because it includes model-specific
-   * variant metadata. Older/supported clients may not expose this command; in
-   * that case retain the historical `models` discovery path and simply offer
-   * the OpenCode default variant.
+   * variant metadata. Retry transient failures before retaining the historical
+   * `models` discovery path as a compatibility fallback.
    */
   const structured =
-    runCatalogCommand(
-      binary,
-      cwd,
-      ["api", "GET", "/api/model"],
-    )
-
-  if (
-    !isProbeTimeoutResult(structured.result) &&
-    !structured.result.error &&
-    structured.result.status === 0 &&
-    structured.stdout.trim() !== ""
-  ) {
-    const entries =
-      parseStructuredCatalog(
-        structured.stdout,
-      )
-
-    if (entries) {
-      return {
-        models: entries.map((entry) => entry.reference),
-        variantsByModel: Object.fromEntries(
-          entries.map((entry) => [entry.reference, entry.variants]),
+    discoverStructuredModelCatalog({
+      run: () =>
+        runCatalogCommand(
+          binary,
+          cwd,
+          ["api", "GET", "/api/model"],
         ),
-        structured: true,
-      }
+      parse: parseStructuredCatalog,
+      isTimeout: isProbeTimeoutResult,
+      sleep: sleepSync,
+    })
+
+  if (structured.entries) {
+    const entries = structured.entries
+
+    return {
+      models: entries.map((entry) => entry.reference),
+      variantsByModel: Object.fromEntries(
+        entries.map((entry) => [entry.reference, entry.variants]),
+      ),
+      structured: true,
     }
   }
+
+  const variantMetadataUnavailableReason =
+    structured.fallbackReason
 
   let last
 
@@ -601,6 +603,7 @@ function discoverModels(catalogCwd) {
     models,
     variantsByModel: {},
     structured: false,
+    variantMetadataUnavailableReason,
   }
 }
 
@@ -754,7 +757,7 @@ console.log(
 
 if (!catalog.structured) {
   console.log(
-    "Variant metadata is unavailable from this OpenCode installation; existing variants for unchanged models will be preserved and new selections will use OpenCode defaults.",
+    `Variant metadata is unavailable: ${catalog.variantMetadataUnavailableReason}. Falling back to plain model discovery; existing variants for unchanged models will be preserved and new selections will use OpenCode defaults.`,
   )
 }
 
