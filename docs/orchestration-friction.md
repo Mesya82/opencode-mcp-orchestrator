@@ -25,6 +25,25 @@ Scout, Worker, and Runner deadlines;
 override. Caller and bridge cancellation still abort the operation and trigger
 best-effort interrupt/removal.
 
+### Read-only refresh progress telemetry
+
+After each intentional wait refresh, the bridge takes one best-effort
+read-only `session.get()` sample for the same session before issuing the next
+`session.wait()`. The sample never prompts, steers, queues, restarts,
+recreates, interrupts, or resends anything; it only observes. It uses the
+outer operation signal (never the already-aborted refresh signal), is bounded
+to at most 5 seconds and never past the absolute operation deadline, and runs
+sequentially between waits so it cannot materially delay the next wait. A
+failed or timed-out read logs `session_progress_unavailable` with the existing
+error name/code/cause diagnostics and a stable reason code, and never fails
+the operation; a genuine wait failure still propagates without a progress
+read. Successful reads log a
+`session_progress` event carrying only safe scalar fields (`updated_at`,
+`idle_at` when present, `outcome` when present, token totals, and `cost`) plus
+whether the snapshot changed since the prior successful read (first read uses
+`changed: null`). No prompt text, message contents, titles, agents, models,
+locations, or metadata are ever logged.
+
 After any delegated infrastructure timeout, check Git status and diff before
 assuming nothing changed. Do not assume timeout means no edits.
 

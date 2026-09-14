@@ -108,6 +108,25 @@ function makeFakeClient(hooks = {}) {
         await hooks.wait(input, options)
       }
     },
+    get: async (input, options) => {
+      calls.push(["get", input, options])
+
+      if (hooks.get) {
+        return hooks.get(input, options)
+      }
+
+      return {
+        id: input.sessionID,
+        time: { created: 1, updated: 1 },
+        tokens: {
+          input: 0,
+          output: 0,
+          reasoning: 0,
+          cache: { read: 0, write: 0 },
+        },
+        cost: 0,
+      }
+    },
     context: async (input, options) => {
       calls.push(["context", input, options])
 
@@ -403,8 +422,34 @@ test("a never-resolving operation terminates within the configured timeout and c
 
 test("session wait refreshes before the transport boundary without cancelling the session", async () => {
   const calls = []
+  const getCalls = []
   const logs = []
   let waitAttempt = 0
+  let getAttempt = 0
+
+  const firstSnapshot = {
+    id: "ses_refresh",
+    time: { created: 1, updated: 100, idle: 50 },
+    tokens: {
+      input: 10,
+      output: 5,
+      reasoning: 1,
+      cache: { read: 2, write: 3 },
+    },
+    cost: 0.01,
+  }
+
+  const secondSnapshot = {
+    id: "ses_refresh",
+    time: { created: 1, updated: 200, idle: 60 },
+    tokens: {
+      input: 20,
+      output: 5,
+      reasoning: 1,
+      cache: { read: 2, write: 3 },
+    },
+    cost: 0.02,
+  }
 
   const client = {
     session: {
@@ -412,7 +457,7 @@ test("session wait refreshes before the transport boundary without cancelling th
         calls.push([input, options])
         waitAttempt += 1
 
-        if (waitAttempt > 2) {
+        if (waitAttempt > 3) {
           return
         }
 
@@ -428,6 +473,20 @@ test("session wait refreshes before the transport boundary without cancelling th
             { once: true },
           )
         })
+      },
+      get: async (input, options) => {
+        getCalls.push([input, options])
+        getAttempt += 1
+
+        if (getAttempt === 2) {
+          return { data: secondSnapshot }
+        }
+
+        if (getAttempt >= 3) {
+          return secondSnapshot
+        }
+
+        return firstSnapshot
       },
     },
   }
@@ -446,31 +505,90 @@ test("session wait refreshes before the transport boundary without cancelling th
     },
   )
 
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
   assert.deepEqual(
     calls.map(([input]) => input.sessionID),
-    ["ses_refresh", "ses_refresh", "ses_refresh"],
+    ["ses_refresh", "ses_refresh", "ses_refresh", "ses_refresh"],
   )
   assert.equal(calls[0][1].signal.aborted, true)
   assert.equal(calls[1][1].signal.aborted, true)
-  assert.equal(calls[2][1].signal.aborted, false)
+  assert.equal(calls[2][1].signal.aborted, true)
+  assert.equal(calls[3][1].signal.aborted, false)
   assert.equal(operationController.signal.aborted, false)
   assert.equal(SESSION_WAIT_REFRESH_MS, 240000)
-  assert.equal(logs.length, 2)
+
+  assert.equal(getCalls.length, 3)
   assert.deepEqual(
-    logs.map(({ event, session_id, wait_attempt, reason }) => ({
-      event,
-      session_id,
-      wait_attempt,
-      reason,
-    })),
-    [1, 2].map((waitAttempt) => ({
-      event: "session_wait_refresh",
+    getCalls.map(([input]) => input.sessionID),
+    ["ses_refresh", "ses_refresh", "ses_refresh"],
+  )
+
+  for (const [, options] of getCalls) {
+    assert.equal(options.signal.aborted, false)
+  }
+
+  assert.deepEqual(
+    logs.map(({ event }) => event),
+    [
+      "session_wait_refresh",
+      "session_progress",
+      "session_wait_refresh",
+      "session_progress",
+      "session_wait_refresh",
+      "session_progress",
+    ],
+  )
+  assert.deepEqual(
+    logs
+      .filter(({ event }) => event === "session_wait_refresh")
+      .map(({ session_id, wait_attempt, reason }) => ({
+        session_id,
+        wait_attempt,
+        reason,
+      })),
+    [1, 2, 3].map((waitAttempt) => ({
       session_id: "ses_refresh",
       wait_attempt: waitAttempt,
       reason: "bounded_wait_refresh_elapsed",
     })),
   )
+
+  const progressLogs = logs.filter(
+    ({ event }) => event === "session_progress",
+  )
+
+  assert.deepEqual(
+    progressLogs.map(({ session_id, wait_attempt }) => ({
+      session_id,
+      wait_attempt,
+    })),
+    [1, 2, 3].map((waitAttempt) => ({
+      session_id: "ses_refresh",
+      wait_attempt: waitAttempt,
+    })),
+  )
+  assert.deepEqual(
+    progressLogs.map(({ changed }) => changed),
+    [null, true, false],
+  )
+  assert.equal(progressLogs[0].updated_at, 100)
+  assert.equal(progressLogs[0].idle_at, 50)
+  assert.equal(progressLogs[0].tokens_input, 10)
+  assert.equal(progressLogs[0].tokens_output, 5)
+  assert.equal(progressLogs[0].cost, 0.01)
+  assert.equal(progressLogs[1].updated_at, 200)
+  assert.equal(progressLogs[1].tokens_input, 20)
+  assert.equal(progressLogs[2].updated_at, 200)
+
+  for (const entry of progressLogs) {
+    assert.ok(entry.elapsed_operation_ms >= 0)
+    assert.ok(entry.remaining_operation_ms > 0)
+    assert.ok(!("title" in entry))
+    assert.ok(!("prompt" in entry))
+    assert.ok(!("message" in entry))
+    assert.ok(!("messages" in entry))
+  }
+
   assert.equal(logs[0].error_name, "Error")
   assert.deepEqual(logs[0].error_cause_chain, [
     { name: "Error", code: "ABORT_ERR" },
@@ -479,16 +597,17 @@ test("session wait refreshes before the transport boundary without cancelling th
   assert.ok(logs[0].remaining_operation_ms > 0)
 })
 
-test("runAgent reissues multiple bounded waits without recreating or reprompting the session", async () => {
-  resetBridgeStateForTests()
+test("a failed progress read does not prevent the next wait", async () => {
+  const logs = []
+  let waitAttempt = 0
+  let getAttempt = 0
 
-  await withTempDir("bridge-wait-refresh-", async (dir) => {
-    let attempts = 0
-    const { calls, client } = makeFakeClient({
-      wait: async (_input, options) => {
-        attempts += 1
+  const client = {
+    session: {
+      wait: async (input, options) => {
+        waitAttempt += 1
 
-        if (attempts > 2) {
+        if (waitAttempt > 2) {
           return
         }
 
@@ -499,6 +618,166 @@ test("runAgent reissues multiple bounded waits without recreating or reprompting
             { once: true },
           )
         })
+      },
+      get: async (input, options) => {
+        getAttempt += 1
+        assert.equal(input.sessionID, "ses_progress_retry")
+        assert.equal(options.signal.aborted, false)
+
+        if (getAttempt === 1) {
+          throw Object.assign(
+            new Error("progress exploded"),
+            { code: "GET_FAIL" },
+          )
+        }
+
+        return {
+          id: "ses_progress_retry",
+          time: { created: 1, updated: 7 },
+          tokens: {
+            input: 3,
+            output: 4,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          cost: 0.005,
+        }
+      },
+    },
+  }
+
+  await waitForSessionCompletion(
+    client,
+    "ses_progress_retry",
+    new AbortController().signal,
+    {
+      refreshMs: 20,
+      operationStartedAt: Date.now(),
+      operationDeadlineAt: Date.now() + 5000,
+      log: (message) => logs.push(JSON.parse(message)),
+    },
+  )
+
+  assert.equal(waitAttempt, 3)
+  assert.equal(getAttempt, 2)
+  assert.deepEqual(
+    logs.map(({ event }) => event),
+    [
+      "session_wait_refresh",
+      "session_progress_unavailable",
+      "session_wait_refresh",
+      "session_progress",
+    ],
+  )
+
+  const unavailable = logs.find(
+    ({ event }) => event === "session_progress_unavailable",
+  )
+
+  assert.equal(unavailable.session_id, "ses_progress_retry")
+  assert.equal(unavailable.wait_attempt, 1)
+  assert.equal(unavailable.reason, "session_get_failed")
+  assert.equal(unavailable.error_name, "Error")
+  assert.equal(unavailable.error_code, "GET_FAIL")
+  assert.ok(unavailable.elapsed_operation_ms >= 0)
+  assert.ok(unavailable.remaining_operation_ms > 0)
+
+  const progress = logs.find(
+    ({ event }) => event === "session_progress",
+  )
+
+  assert.equal(progress.session_id, "ses_progress_retry")
+  assert.equal(progress.wait_attempt, 2)
+  assert.equal(progress.changed, null)
+  assert.equal(progress.updated_at, 7)
+  assert.equal(progress.tokens_input, 3)
+})
+
+test("a hanging progress read cannot extend the absolute operation deadline", async () => {
+  const logs = []
+  let progressSignal
+  const startedAt = Date.now()
+
+  const client = {
+    session: {
+      wait: async (input, options) => {
+        await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("Transport")),
+            { once: true },
+          )
+        })
+      },
+      get: async (input, options) => {
+        progressSignal = options.signal
+        await new Promise(() => {})
+      },
+    },
+  }
+
+  await assert.rejects(
+    () => waitForSessionCompletion(
+      client,
+      "ses_progress_deadline",
+      new AbortController().signal,
+      {
+        refreshMs: 20,
+        operationStartedAt: startedAt,
+        operationDeadlineAt: startedAt + 100,
+        log: (message) => logs.push(JSON.parse(message)),
+      },
+    ),
+    /exceeded its overall operation deadline/,
+  )
+
+  assert.ok(Date.now() - startedAt < 1000)
+  assert.equal(progressSignal.aborted, true)
+  assert.deepEqual(
+    logs.map(({ event }) => event),
+    ["session_wait_refresh", "session_progress_unavailable"],
+  )
+  assert.equal(logs[1].reason, "progress_read_timeout")
+})
+
+test("runAgent reissues multiple bounded waits without recreating or reprompting the session", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-wait-refresh-", async (dir) => {
+    let attempts = 0
+    let getAttempts = 0
+    const { calls, client } = makeFakeClient({
+      wait: async (_input, options) => {
+        attempts += 1
+
+        if (attempts > 3) {
+          return
+        }
+
+        await new Promise((resolve, reject) => {
+          options.signal.addEventListener(
+            "abort",
+            () => reject(new Error("Transport")),
+            { once: true },
+          )
+        })
+      },
+      get: async (input, options) => {
+        getAttempts += 1
+        assert.equal(input.sessionID, "ses_test")
+        assert.equal(options.signal.aborted, false)
+
+        return {
+          id: "ses_test",
+          time: { created: 1, updated: 100 + getAttempts },
+          tokens: {
+            input: getAttempts,
+            output: 0,
+            reasoning: 0,
+            cache: { read: 0, write: 0 },
+          },
+          cost: 0.001 * getAttempts,
+        }
       },
     })
 
@@ -518,11 +797,17 @@ test("runAgent reissues multiple bounded waits without recreating or reprompting
     assert.equal(result, "hello")
     assert.equal(callNames(calls, "create").length, 1)
     assert.equal(callNames(calls, "prompt").length, 1)
-    assert.equal(callNames(calls, "wait").length, 3)
+    assert.equal(callNames(calls, "wait").length, 4)
     assert.deepEqual(
       callNames(calls, "wait").map((call) => call[1].sessionID),
+      ["ses_test", "ses_test", "ses_test", "ses_test"],
+    )
+    assert.equal(callNames(calls, "get").length, 3)
+    assert.deepEqual(
+      callNames(calls, "get").map((call) => call[1].sessionID),
       ["ses_test", "ses_test", "ses_test"],
     )
+    assert.equal(getAttempts, 3)
     assert.equal(callNames(calls, "context").length, 1)
     assert.equal(callNames(calls, "interrupt").length, 0)
     assert.equal(callNames(calls, "remove").length, 1)
@@ -533,6 +818,7 @@ test("runAgent reissues multiple bounded waits without recreating or reprompting
 
 test("session wait does not retry a real transport failure", async () => {
   let attempts = 0
+  let getAttempts = 0
   const logs = []
   const expected = new Error("real transport failure", {
     cause: Object.assign(
@@ -545,6 +831,10 @@ test("session wait does not retry a real transport failure", async () => {
       wait: async () => {
         attempts += 1
         throw expected
+      },
+      get: async () => {
+        getAttempts += 1
+        return {}
       },
     },
   }
@@ -564,6 +854,7 @@ test("session wait does not retry a real transport failure", async () => {
   )
 
   assert.equal(attempts, 1)
+  assert.equal(getAttempts, 0)
   assert.equal(logs.length, 1)
   assert.equal(logs[0].event, "session_wait_failure")
   assert.equal(logs[0].reason, "wait_rejected_before_refresh_boundary")

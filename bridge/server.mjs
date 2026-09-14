@@ -148,6 +148,13 @@ export const MAX_BRIDGE_TIMEOUT_MS = 3_600_000
 export const SESSION_WAIT_REFRESH_MS = 240_000
 
 /*
+ * Best-effort bound for the read-only session.get() progress sample taken
+ * between bounded session.wait() refreshes. The sample never extends past
+ * the absolute operation deadline and never controls the session.
+ */
+const SESSION_PROGRESS_READ_TIMEOUT_MS = 5_000
+
+/*
  * Upper bound for best-effort session cleanup (interrupt/remove) so a
  * wedged service cannot hold a bridge operation open indefinitely.
  * Tests may narrow this bound with overrides.cleanupTimeoutMs so hanging
@@ -516,6 +523,142 @@ export function resetBridgeStateForTests() {
   writerDirectoryStates.clear()
 }
 
+/*
+ * Normalize the read-only session.get() result. The generated client
+ * resolves SessionInfo directly; tolerate an optional { data: SessionInfo }
+ * wrapper. Returns null when no object shape is present.
+ */
+function normalizeSessionProgressInfo(raw) {
+  const info =
+    raw !== null &&
+    typeof raw === "object" &&
+    !Array.isArray(raw) &&
+    raw.data !== null &&
+    typeof raw.data === "object" &&
+    !Array.isArray(raw.data)
+      ? raw.data
+      : raw
+
+  if (
+    info === null ||
+    typeof info !== "object" ||
+    Array.isArray(info)
+  ) {
+    return null
+  }
+
+  return info
+}
+
+/*
+ * Extract only safe scalar telemetry from SessionInfo. Never includes
+ * prompt text, message contents, titles, agents, models, locations, or
+ * metadata. Missing optional fields are omitted.
+ */
+function extractProgressSnapshot(info) {
+  const snapshot = {}
+
+  const updated = info?.time?.updated
+
+  if (
+    typeof updated === "number" &&
+    Number.isFinite(updated)
+  ) {
+    snapshot.updated_at = updated
+  }
+
+  const idle = info?.time?.idle
+
+  if (
+    typeof idle === "number" &&
+    Number.isFinite(idle)
+  ) {
+    snapshot.idle_at = idle
+  }
+
+  if (
+    typeof info?.outcome === "string" &&
+    info.outcome !== ""
+  ) {
+    snapshot.outcome = info.outcome
+  }
+
+  const tokens = info?.tokens
+
+  if (
+    tokens !== null &&
+    typeof tokens === "object" &&
+    !Array.isArray(tokens)
+  ) {
+    if (
+      typeof tokens.input === "number" &&
+      Number.isFinite(tokens.input)
+    ) {
+      snapshot.tokens_input = tokens.input
+    }
+
+    if (
+      typeof tokens.output === "number" &&
+      Number.isFinite(tokens.output)
+    ) {
+      snapshot.tokens_output = tokens.output
+    }
+
+    if (
+      typeof tokens.reasoning === "number" &&
+      Number.isFinite(tokens.reasoning)
+    ) {
+      snapshot.tokens_reasoning = tokens.reasoning
+    }
+
+    const cache = tokens.cache
+
+    if (
+      cache !== null &&
+      typeof cache === "object" &&
+      !Array.isArray(cache)
+    ) {
+      if (
+        typeof cache.read === "number" &&
+        Number.isFinite(cache.read)
+      ) {
+        snapshot.tokens_cache_read = cache.read
+      }
+
+      if (
+        typeof cache.write === "number" &&
+        Number.isFinite(cache.write)
+      ) {
+        snapshot.tokens_cache_write = cache.write
+      }
+    }
+  }
+
+  if (
+    typeof info?.cost === "number" &&
+    Number.isFinite(info.cost)
+  ) {
+    snapshot.cost = info.cost
+  }
+
+  return snapshot
+}
+
+function progressSnapshotsEqual(previous, current) {
+  const keys = new Set([
+    ...Object.keys(previous),
+    ...Object.keys(current),
+  ])
+
+  for (const key of keys) {
+    if (previous[key] !== current[key]) {
+      return false
+    }
+  }
+
+  return true
+}
+
 function settleWithin(promise, ms) {
   return (async () => {
     let timer
@@ -662,6 +805,173 @@ export async function waitForSessionCompletion(
   }
 
   let attempt = 0
+  let previousProgressSnapshot = null
+
+  const readSessionProgress = async (waitAttempt) => {
+    /*
+     * Read-only telemetry between bounded waits. Never prompts, steers,
+     * queues, restarts, recreates, interrupts, or resends anything. Uses
+     * the outer operation signal (never the already-aborted refresh
+     * signal) combined with a short timeout so the read cannot delay the
+     * next wait or pass the absolute operation deadline. Failures are
+     * logged diagnostically and never fail the operation.
+     */
+    if (operationSignal?.aborted) {
+      return
+    }
+
+    if (
+      !client?.session ||
+      typeof client.session.get !== "function"
+    ) {
+      log(JSON.stringify({
+        event: "session_progress_unavailable",
+        session_id: sessionID,
+        wait_attempt: waitAttempt,
+        elapsed_operation_ms: Date.now() - operationStartedAt,
+        remaining_operation_ms: Math.max(
+          0,
+          operationDeadlineAt - Date.now(),
+        ),
+        reason: "session_get_unavailable",
+        ...errorDetails(
+          new Error("session progress read is unavailable"),
+        ),
+      }))
+
+      return
+    }
+
+    const remainingMs = operationDeadlineAt - Date.now()
+
+    if (remainingMs <= 0) {
+      return
+    }
+
+    const budgetMs = Math.min(
+      SESSION_PROGRESS_READ_TIMEOUT_MS,
+      remainingMs,
+    )
+    const progressController = new AbortController()
+    let progressTimer
+
+    const timeoutOutcome = new Promise((innerResolve) => {
+      progressTimer = setTimeout(() => {
+        progressController.abort()
+
+        innerResolve({
+          status: "timeout",
+        })
+      }, budgetMs)
+
+      if (typeof progressTimer?.unref === "function") {
+        progressTimer.unref()
+      }
+    })
+
+    try {
+      const progressSignal = operationSignal
+        ? AbortSignal.any([
+            operationSignal,
+            progressController.signal,
+          ])
+        : progressController.signal
+
+      const readOutcome = (async () => {
+        try {
+          const raw = await client.session.get(
+            { sessionID },
+            { signal: progressSignal },
+          )
+
+          return { status: "ready", raw }
+        } catch (error) {
+          return { status: "failed", error }
+        }
+      })()
+
+      const outcome = await Promise.race([
+        readOutcome,
+        timeoutOutcome,
+      ])
+
+      if (outcome.status === "ready") {
+        const info = normalizeSessionProgressInfo(outcome.raw)
+
+        if (info === null) {
+          log(JSON.stringify({
+            event: "session_progress_unavailable",
+            session_id: sessionID,
+            wait_attempt: waitAttempt,
+            elapsed_operation_ms: Date.now() - operationStartedAt,
+            remaining_operation_ms: Math.max(
+              0,
+              operationDeadlineAt - Date.now(),
+            ),
+            reason: "empty_progress_snapshot",
+            ...errorDetails(
+              new Error("session progress snapshot was empty"),
+            ),
+          }))
+        } else {
+          const snapshot = extractProgressSnapshot(info)
+          const changed = previousProgressSnapshot === null
+            ? null
+            : !progressSnapshotsEqual(
+                previousProgressSnapshot,
+                snapshot,
+              )
+
+          previousProgressSnapshot = snapshot
+
+          log(JSON.stringify({
+            event: "session_progress",
+            session_id: sessionID,
+            wait_attempt: waitAttempt,
+            elapsed_operation_ms: Date.now() - operationStartedAt,
+            remaining_operation_ms: Math.max(
+              0,
+              operationDeadlineAt - Date.now(),
+            ),
+            changed,
+            ...snapshot,
+          }))
+        }
+      } else if (outcome.status === "failed") {
+        log(JSON.stringify({
+          event: "session_progress_unavailable",
+          session_id: sessionID,
+          wait_attempt: waitAttempt,
+          elapsed_operation_ms: Date.now() - operationStartedAt,
+          remaining_operation_ms: Math.max(
+            0,
+            operationDeadlineAt - Date.now(),
+          ),
+          reason: "session_get_failed",
+          ...errorDetails(outcome.error),
+        }))
+      } else {
+        log(JSON.stringify({
+          event: "session_progress_unavailable",
+          session_id: sessionID,
+          wait_attempt: waitAttempt,
+          elapsed_operation_ms: Date.now() - operationStartedAt,
+          remaining_operation_ms: Math.max(
+            0,
+            operationDeadlineAt - Date.now(),
+          ),
+          reason: "progress_read_timeout",
+          ...errorDetails(
+            new Error("session progress read timed out"),
+          ),
+        }))
+      }
+    } finally {
+      if (progressTimer !== undefined) {
+        clearTimeout(progressTimer)
+      }
+    }
+  }
 
   while (true) {
     if (operationSignal?.aborted) {
@@ -747,6 +1057,8 @@ export async function waitForSessionCompletion(
         refresh_ms: refreshMs,
         ...errorDetails(error),
       }))
+
+      await readSessionProgress(attempt)
     } finally {
       if (refreshTimer !== undefined) {
         clearTimeout(refreshTimer)
