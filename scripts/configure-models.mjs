@@ -247,7 +247,8 @@ function parseStructuredCatalog(stdout) {
     if (
       raw === null ||
       typeof raw !== "object" ||
-      Array.isArray(raw)
+      Array.isArray(raw) ||
+      raw.enabled === false
     ) {
       continue
     }
@@ -751,7 +752,7 @@ console.log(
 
 if (!catalog.structured) {
   console.log(
-    "Variant metadata is unavailable from this OpenCode installation; model variants will use OpenCode defaults.",
+    "Variant metadata is unavailable from this OpenCode installation; existing variants for unchanged models will be preserved and new selections will use OpenCode defaults.",
   )
 }
 
@@ -826,12 +827,20 @@ config.modelVariants = {}
 
 for (const role of MODEL_ROLES) {
   const model = config.models[role]
-  const variants = catalog.variantsByModel[model] ?? []
   const compatiblePrevious =
     previousModels[role] === model
       ? previousVariants[role]
       : undefined
 
+  if (!catalog.structured) {
+    if (compatiblePrevious !== undefined) {
+      config.modelVariants[role] = compatiblePrevious
+    }
+
+    continue
+  }
+
+  const variants = catalog.variantsByModel[model] ?? []
   const selected =
     await chooseVariant({
       model,
