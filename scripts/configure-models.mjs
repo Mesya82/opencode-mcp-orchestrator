@@ -56,6 +56,14 @@ import {
   timeoutLimitConfig,
 } from "../config/timeout-limits.mjs"
 
+const MODEL_ROLES = [
+  "scout",
+  "worker",
+  "runner",
+]
+
+const DEFAULT_VARIANT_CHOICE = Symbol("default-model-variant")
+
 function parseArgs(argv) {
   const result = {
     config: null,
@@ -80,14 +88,14 @@ function parseArgs(argv) {
 Usage:
   configure-models.mjs [--config PATH] [--catalog-cwd PATH]
 
-Interactively select the OpenCode model used for:
+Interactively select the OpenCode model and optional advertised variant used for:
 
   scout
   worker
   runner
 
 Available choices are discovered from the user's current OpenCode
-installation. No provider or model list is maintained by this project.
+installation. No provider, model, or variant list is maintained by this project.
 
 The configurator also selects Standard, Extended, or Custom model-step
 and wall-clock timeout limits for the delegated roles.
@@ -127,16 +135,16 @@ function sleepSync(milliseconds) {
   )
 }
 
-function runModelCatalogCommand(
+function runCatalogCommand(
   binary,
   cwd,
+  args,
 ) {
   /*
    * Current OpenCode V2 beta can behave differently when CLI stdout is
-   * captured through a pipe.
-   *
-   * Capture to ordinary files instead. This is also friendlier to CLI
-   * programs that change behaviour based on their output descriptor.
+   * captured through a pipe. Capture to ordinary files instead. This is
+   * also friendlier to CLI programs that change behaviour based on their
+   * output descriptor.
    */
   const temporaryDirectory =
     mkdtempSync(
@@ -177,17 +185,11 @@ function runModelCatalogCommand(
   try {
     result = spawnSync(
       binary,
-      ["models"],
+      args,
       {
         cwd,
         env: process.env,
         timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
-
-        /*
-         * The command itself requires no input.
-         *
-         * Crucially, stdout/stderr are regular files rather than pipes.
-         */
         stdio: [
           "ignore",
           stdoutFd,
@@ -225,6 +227,155 @@ function runModelCatalogCommand(
     stdout,
     stderr,
   }
+}
+
+function parseStructuredCatalog(stdout) {
+  let parsed
+
+  try {
+    parsed = JSON.parse(stdout)
+  } catch {
+    return null
+  }
+
+  if (!Array.isArray(parsed?.data)) {
+    return null
+  }
+
+  const entries = []
+  const seen = new Set()
+
+  for (const raw of parsed.data) {
+    if (
+      raw === null ||
+      typeof raw !== "object" ||
+      Array.isArray(raw) ||
+      raw.enabled === false
+    ) {
+      continue
+    }
+
+    const providerID = raw.providerID
+    const modelID = raw.modelID ?? raw.id
+
+    if (
+      typeof providerID !== "string" ||
+      providerID === "" ||
+      typeof modelID !== "string" ||
+      modelID === "" ||
+      /\s/.test(providerID) ||
+      /\s/.test(modelID)
+    ) {
+      continue
+    }
+
+    const reference = `${providerID}/${modelID}`
+
+    if (seen.has(reference)) {
+      continue
+    }
+
+    seen.add(reference)
+
+    const variants = []
+    const seenVariants = new Set()
+
+    if (Array.isArray(raw.variants)) {
+      for (const candidate of raw.variants) {
+        const id = candidate?.id
+
+        if (
+          typeof id !== "string" ||
+          id === "" ||
+          /\s/.test(id) ||
+          seenVariants.has(id)
+        ) {
+          continue
+        }
+
+        seenVariants.add(id)
+        variants.push(id)
+      }
+    }
+
+    entries.push({
+      reference,
+      variants,
+    })
+  }
+
+  if (entries.length === 0) {
+    return null
+  }
+
+  entries.sort((a, b) => {
+    const providerA =
+      a.reference.slice(
+        0,
+        a.reference.indexOf("/"),
+      )
+    const providerB =
+      b.reference.slice(
+        0,
+        b.reference.indexOf("/"),
+      )
+
+    return (
+      providerA.localeCompare(providerB) ||
+      a.reference.localeCompare(b.reference)
+    )
+  })
+
+  return entries
+}
+
+function parsePlainModelCatalog(stdout) {
+  const models = []
+
+  for (
+    const rawLine
+    of stdout.split(/\r?\n/)
+  ) {
+    const line =
+      stripAnsi(rawLine).trim()
+
+    if (!line) continue
+    if (!line.includes("/")) continue
+    if (/\s/.test(line)) continue
+
+    const slash =
+      line.indexOf("/")
+
+    if (
+      slash <= 0 ||
+      slash === line.length - 1
+    ) {
+      continue
+    }
+
+    models.push(line)
+  }
+
+  return [...new Set(models)].sort(
+    (a, b) => {
+      const providerA =
+        a.slice(
+          0,
+          a.indexOf("/"),
+        )
+
+      const providerB =
+        b.slice(
+          0,
+          b.indexOf("/"),
+        )
+
+      return (
+        providerA.localeCompare(providerB) ||
+        a.localeCompare(b)
+      )
+    },
+  )
 }
 
 function discoverModels(catalogCwd) {
@@ -330,6 +481,41 @@ function discoverModels(catalogCwd) {
       : process.env.HOME ||
         process.cwd()
 
+  /*
+   * Prefer OpenCode's structured catalog because it includes model-specific
+   * variant metadata. Older/supported clients may not expose this command; in
+   * that case retain the historical `models` discovery path and simply offer
+   * the OpenCode default variant.
+   */
+  const structured =
+    runCatalogCommand(
+      binary,
+      cwd,
+      ["api", "GET", "/api/model"],
+    )
+
+  if (
+    !isProbeTimeoutResult(structured.result) &&
+    !structured.result.error &&
+    structured.result.status === 0 &&
+    structured.stdout.trim() !== ""
+  ) {
+    const entries =
+      parseStructuredCatalog(
+        structured.stdout,
+      )
+
+    if (entries) {
+      return {
+        models: entries.map((entry) => entry.reference),
+        variantsByModel: Object.fromEntries(
+          entries.map((entry) => [entry.reference, entry.variants]),
+        ),
+        structured: true,
+      }
+    }
+  }
+
   let last
 
   for (
@@ -338,9 +524,10 @@ function discoverModels(catalogCwd) {
     attempt++
   ) {
     last =
-      runModelCatalogCommand(
+      runCatalogCommand(
         binary,
         cwd,
+        ["models"],
       )
 
     if (isProbeTimeoutResult(last.result)) {
@@ -391,65 +578,10 @@ function discoverModels(catalogCwd) {
   const stderr =
     last?.stderr ?? ""
 
-  const models = []
+  const models =
+    parsePlainModelCatalog(stdout)
 
-  /*
-   * OpenCode currently outputs one canonical reference per line:
-   *
-   *   provider/model
-   *
-   * Keep parsing intentionally strict and boring. OpenCode owns the
-   * catalog; this project does not maintain its own model list.
-   */
-  for (
-    const rawLine
-    of stdout.split(/\r?\n/)
-  ) {
-    const line =
-      stripAnsi(rawLine).trim()
-
-    if (!line) continue
-    if (!line.includes("/")) continue
-    if (/\s/.test(line)) continue
-
-    const slash =
-      line.indexOf("/")
-
-    if (
-      slash <= 0 ||
-      slash === line.length - 1
-    ) {
-      continue
-    }
-
-    models.push(line)
-  }
-
-  const sorted =
-    [...new Set(models)].sort(
-      (a, b) => {
-        const providerA =
-          a.slice(
-            0,
-            a.indexOf("/"),
-          )
-
-        const providerB =
-          b.slice(
-            0,
-            b.indexOf("/"),
-          )
-
-        return (
-          providerA.localeCompare(
-            providerB,
-          ) ||
-          a.localeCompare(b)
-        )
-      },
-    )
-
-  if (sorted.length === 0) {
+  if (models.length === 0) {
     throw new Error(
       [
         "OpenCode returned no selectable models.",
@@ -465,7 +597,11 @@ function discoverModels(catalogCwd) {
     )
   }
 
-  return sorted
+  return {
+    models,
+    variantsByModel: {},
+    structured: false,
+  }
 }
 
 function loadConfig(path) {
@@ -473,6 +609,7 @@ function loadConfig(path) {
     return {
       version: 1,
       models: {},
+      modelVariants: {},
     }
   }
 
@@ -487,6 +624,9 @@ function loadConfig(path) {
       ...parsed,
       models: {
         ...(parsed.models ?? {}),
+      },
+      modelVariants: {
+        ...(parsed.modelVariants ?? {}),
       },
     }
   } catch (error) {
@@ -554,6 +694,40 @@ async function chooseModel({
   })
 }
 
+async function chooseVariant({
+  model,
+  role,
+  variants,
+  current,
+}) {
+  if (!Array.isArray(variants) || variants.length === 0) {
+    return undefined
+  }
+
+  const currentIsValid =
+    typeof current === "string" &&
+    variants.includes(current)
+
+  const chosen = await select({
+    message: `Select variant for ${role} (${model})`,
+    default: currentIsValid ? current : undefined,
+    choices: [
+      {
+        name: "Default — use OpenCode model default",
+        value: DEFAULT_VARIANT_CHOICE,
+      },
+      ...variants.map((variant) => ({
+        name: variant,
+        value: variant,
+      })),
+    ],
+  })
+
+  return chosen === DEFAULT_VARIANT_CHOICE
+    ? undefined
+    : chosen
+}
+
 const args =
   parseArgs(
     process.argv.slice(2),
@@ -567,19 +741,34 @@ const configPath =
 console.log()
 console.log("Discovering models from OpenCode...")
 
-const models =
+const catalog =
   discoverModels(
     args.catalogCwd,
   )
+
+const models = catalog.models
 
 console.log(
   `Found ${models.length} selectable model${models.length === 1 ? "" : "s"}.`,
 )
 
+if (!catalog.structured) {
+  console.log(
+    "Variant metadata is unavailable from this OpenCode installation; existing variants for unchanged models will be preserved and new selections will use OpenCode defaults.",
+  )
+}
+
 const config =
   loadConfig(
     configPath,
   )
+
+const previousModels = {
+  ...config.models,
+}
+const previousVariants = {
+  ...config.modelVariants,
+}
 
 const useOne =
   await confirm({
@@ -634,6 +823,41 @@ if (useOne) {
       current:
         config.models.runner,
     })
+}
+
+config.modelVariants = {}
+
+for (const role of MODEL_ROLES) {
+  const model = config.models[role]
+  const compatiblePrevious =
+    previousModels[role] === model
+      ? previousVariants[role]
+      : undefined
+
+  if (!catalog.structured) {
+    if (compatiblePrevious !== undefined) {
+      config.modelVariants[role] = compatiblePrevious
+    }
+
+    continue
+  }
+
+  const variants = catalog.variantsByModel[model] ?? []
+  const selected =
+    await chooseVariant({
+      model,
+      role,
+      variants,
+      current: compatiblePrevious,
+    })
+
+  if (selected !== undefined) {
+    config.modelVariants[role] = selected
+  }
+}
+
+if (Object.keys(config.modelVariants).length === 0) {
+  delete config.modelVariants
 }
 
 const currentStepLimits =
@@ -825,17 +1049,14 @@ console.log()
 console.log("Configuration saved.")
 console.log()
 
-console.log(
-  `Scout   ${config.models.scout}`,
-)
+for (const role of MODEL_ROLES) {
+  const label = role[0].toUpperCase() + role.slice(1)
+  const variant = config.modelVariants?.[role] ?? "default"
 
-console.log(
-  `Worker  ${config.models.worker}`,
-)
-
-console.log(
-  `Runner  ${config.models.runner}`,
-)
+  console.log(
+    `${label.padEnd(7)} ${config.models[role]} (variant: ${variant})`,
+  )
+}
 
 const savedStepLimits =
   normalizeStepLimits(

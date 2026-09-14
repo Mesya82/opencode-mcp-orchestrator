@@ -23,6 +23,7 @@ export const MODEL_ROLES = Object.freeze([
 ])
 
 export const MAX_MODEL_REFERENCE_LENGTH = 256
+export const MAX_MODEL_VARIANT_LENGTH = 128
 
 export const SUPPORTED_INTEGRATIONS = Object.freeze([
   "codex",
@@ -108,6 +109,34 @@ export function validateModelReference(reference, role) {
   }
 }
 
+export function validateModelVariant(variant, role) {
+  if (
+    typeof variant !== "string" ||
+    variant === ""
+  ) {
+    throw new Error(
+      `invalid model variant for role "${role}" at path "modelVariants.${role}": expected non-empty variant id`,
+    )
+  }
+
+  if (variant.length > MAX_MODEL_VARIANT_LENGTH) {
+    throw new Error(
+      `invalid model variant for role "${role}" at path "modelVariants.${role}": variant id is too long`,
+    )
+  }
+
+  if (
+    /\s/.test(variant) ||
+    hasControlCharacters(variant)
+  ) {
+    throw new Error(
+      `invalid model variant for role "${role}" at path "modelVariants.${role}": expected variant id without whitespace or control characters`,
+    )
+  }
+
+  return variant
+}
+
 export function validateBridgeConfig(config, options = {}) {
   const label = options.configPath ?? "configuration"
 
@@ -121,6 +150,7 @@ export function validateBridgeConfig(config, options = {}) {
     if (
       key !== "version" &&
       key !== "models" &&
+      key !== "modelVariants" &&
       key !== "stepLimits" &&
       key !== "timeoutLimits" &&
       key !== "integrations" &&
@@ -149,6 +179,27 @@ export function validateBridgeConfig(config, options = {}) {
       config.models[role],
       role,
     )
+  }
+
+  if (config.modelVariants !== undefined) {
+    if (!isPlainObject(config.modelVariants)) {
+      throw new Error(
+        `invalid configuration ${label}: expected modelVariants object at path "modelVariants"`,
+      )
+    }
+
+    for (const role of Object.keys(config.modelVariants)) {
+      if (!MODEL_ROLES.includes(role)) {
+        throw new Error(
+          `invalid configuration ${label}: unknown role at path "modelVariants.${role}"`,
+        )
+      }
+
+      validateModelVariant(
+        config.modelVariants[role],
+        role,
+      )
+    }
   }
 
   let normalizedStepLimits

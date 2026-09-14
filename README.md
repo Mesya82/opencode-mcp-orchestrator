@@ -97,8 +97,8 @@ The interactive installer then:
 2. detects and removes an existing project-owned installation, if present,
    while preserving user configuration
 3. installs the requested release as a fresh core payload
-4. discovers models available through OpenCode
-5. lets the user choose models and a step-limit profile
+4. discovers models and model-specific variants available through OpenCode
+5. lets the user choose models, optional variants, and a step-limit profile
 6. detects supported parent coding clients
 7. lets the user select integrations
 8. renders and installs the OpenCode agents plus sandbox plugin
@@ -107,10 +107,16 @@ The interactive installer then:
 
 ## Model selection
 
-Scout, Worker, and Runner may use the same model or different models.
+Scout, Worker, and Runner may use the same model or different models. Each role
+may also choose its own OpenCode model variant, even when multiple roles use the
+same model.
 
 The selector reads the user's actual OpenCode model catalog instead of
-maintaining a project-specific list.
+maintaining a project-specific list. When OpenCode exposes structured variant
+metadata, the installer offers exactly those variants plus `Default`. Choosing
+`Default`, or omitting a role from `modelVariants`, leaves variant/reasoning
+selection to OpenCode. Existing configurations without `modelVariants` remain
+valid and keep the historical default behavior.
 
 Configuration is stored at:
 
@@ -125,6 +131,11 @@ Example:
         "worker": "provider/model-b",
         "runner": "provider/model-c"
       },
+      "modelVariants": {
+        "scout": "low",
+        "worker": "low",
+        "runner": "minimal"
+      },
       "stepLimits": {
         "profile": "standard"
       },
@@ -136,6 +147,11 @@ Example:
         "claude"
       ]
     }
+
+Variant IDs are model-specific and discovered from OpenCode. The example names
+above are illustrative, not a project-maintained compatibility list. See
+`docs/model-variants.md` for discovery, fallback, and backward-compatibility
+details.
 
 ## Step-limit profiles
 
@@ -501,7 +517,7 @@ The doctor checks:
 
 - runtime prerequisites
 - installed core files
-- configured role models
+- configured role models and optional per-role variants
 - the step-limit profile and per-role values
 - the timeout profile, per-role values, and parent MCP deadline
 - the installed Codex MCP timeout matches the orchestrator configuration
