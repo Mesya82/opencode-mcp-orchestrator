@@ -31,6 +31,7 @@ import {
   SANDBOX_SHELL_TIMEOUT_MS_MIN,
   SANDBOX_TOOLCHAIN_DIRS_ENV,
   SANDBOX_RUN_INPUT_PROPERTY_NAMES,
+  omitUnsupportedMuseFinalToolChoice,
   stripUnreplayableMuseReasoning,
   addAbsoluteWorktreeBind,
   addSandboxToolchainBinds,
@@ -57,6 +58,162 @@ import {
   sandboxRunInputSchema,
   validateRunID,
 } from "../../opencode/plugins/sandbox-tools/index.ts"
+
+function museFinalRequest(overrides = {}) {
+  const controller = new AbortController()
+  const body = overrides.body ?? {
+    model: "muse-spark-1.3-contributor-free",
+    tools: [],
+    tool_choice: "none",
+    input: [{ role: "user", content: "finish" }],
+  }
+  const request = new Request(
+    overrides.url ?? "https://console.example.test/v1/responses",
+    {
+      method: overrides.method ?? "POST",
+      headers: {
+        authorization: "Bearer secret-test-value",
+        "content-type": overrides.contentType ?? "application/json",
+        "x-test-header": "preserve-me",
+      },
+      body:
+        overrides.rawBody ??
+        JSON.stringify(body),
+      signal: controller.signal,
+    },
+  )
+
+  return {
+    controller,
+    input: {
+      sessionID: "ses_test",
+      agent: "opencode-orchestrator-worker",
+      kind: "primary",
+      model: {
+        providerID: "opencode",
+        id: "muse-spark-1.3-contributor-free",
+      },
+      request,
+      ...overrides.input,
+    },
+  }
+}
+
+test("Muse final request omits unsupported none choice after tools are removed", async () => {
+  const { controller, input } = museFinalRequest()
+  const original = input.request
+
+  assert.equal(
+    await omitUnsupportedMuseFinalToolChoice(input),
+    true,
+  )
+  assert.notEqual(input.request, original)
+  assert.equal(original.bodyUsed, false)
+  assert.equal(input.request.url, original.url)
+  assert.equal(input.request.method, "POST")
+  assert.equal(
+    input.request.headers.get("authorization"),
+    "Bearer secret-test-value",
+  )
+  assert.equal(
+    input.request.headers.get("x-test-header"),
+    "preserve-me",
+  )
+
+  assert.deepEqual(await input.request.clone().json(), {
+    model: "muse-spark-1.3-contributor-free",
+    tools: [],
+    input: [{ role: "user", content: "finish" }],
+  })
+
+  assert.equal(input.request.signal.aborted, false)
+  controller.abort()
+  assert.equal(input.request.signal.aborted, true)
+})
+
+test("Muse final request also permits an omitted tools field", async () => {
+  const { input } = museFinalRequest({
+    body: {
+      model: "muse-spark-1.3-contributor-free",
+      tool_choice: "none",
+    },
+  })
+
+  assert.equal(
+    await omitUnsupportedMuseFinalToolChoice(input),
+    true,
+  )
+  assert.deepEqual(await input.request.json(), {
+    model: "muse-spark-1.3-contributor-free",
+  })
+})
+
+test("Muse final request compatibility rewrite fails closed", async () => {
+  const cases = [
+    {
+      name: "ordinary agent",
+      input: { agent: "ordinary-agent" },
+    },
+    {
+      name: "other provider",
+      input: {
+        model: {
+          providerID: "other",
+          id: "muse-spark-1.3-contributor-free",
+        },
+      },
+    },
+    {
+      name: "other model",
+      input: {
+        model: {
+          providerID: "opencode",
+          id: "different-model",
+        },
+      },
+    },
+    {
+      name: "auxiliary request",
+      input: { kind: "compaction" },
+    },
+    {
+      name: "tools still present",
+      body: {
+        tools: [{ type: "function", name: "read" }],
+        tool_choice: "none",
+      },
+    },
+    {
+      name: "automatic choice",
+      body: { tools: [], tool_choice: "auto" },
+    },
+    {
+      name: "unknown tools shape",
+      body: { tools: null, tool_choice: "none" },
+    },
+    {
+      name: "non-JSON content type",
+      contentType: "text/plain",
+    },
+    {
+      name: "malformed JSON",
+      rawBody: "{not-json",
+    },
+  ]
+
+  for (const candidate of cases) {
+    const { input } = museFinalRequest(candidate)
+    const original = input.request
+
+    assert.equal(
+      await omitUnsupportedMuseFinalToolChoice(input),
+      false,
+      candidate.name,
+    )
+    assert.equal(input.request, original, candidate.name)
+    assert.equal(original.bodyUsed, false, candidate.name)
+  }
+})
 
 test("Muse orchestrator contexts drop unreplayable reasoning only", () => {
   const messages = [

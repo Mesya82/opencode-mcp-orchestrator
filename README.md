@@ -300,9 +300,13 @@ Equivalent XDG paths are used when `XDG_CONFIG_HOME` is set.
 For orchestrator-owned sessions using OpenCode Console/Zen Muse Spark models,
 the plugin omits hidden reasoning parts from subsequent provider requests. This
 avoids replaying caller-bound encrypted reasoning state that Console may reject
-after tool use. Visible text and tool history are retained. The workaround is
-scoped to `opencode-orchestrator-*` agents with `opencode/muse-spark-*`; it does
-not alter ordinary OpenCode sessions or silently select another provider.
+after tool use. On the final configured agent step, after OpenCode has removed
+all tools, the plugin also omits the unsupported `tool_choice: "none"` field so
+Console can use its `auto` default and return the text-only final report. The
+absence of tools preserves the hard step boundary. Visible text and tool
+history are retained. Both workarounds are scoped to `opencode-orchestrator-*`
+agents with `opencode/muse-spark-*`; they do not alter ordinary OpenCode
+sessions or silently select another provider.
 The upstream defect is tracked as
 [anomalyco/opencode#48741](https://github.com/anomalyco/opencode/issues/48741);
 see `docs/orchestration-friction.md` for status, validation, and workaround

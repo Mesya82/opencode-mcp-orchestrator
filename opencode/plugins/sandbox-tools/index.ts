@@ -68,6 +68,90 @@ export const ORCHESTRATOR_AGENT_PREFIX =
 export const MUSE_SPARK_MODEL_PREFIX =
   "muse-spark-"
 
+type MuseFinalHttpRequest = {
+  readonly sessionID?: unknown
+  readonly agent?: unknown
+  readonly kind?: unknown
+  readonly model?: {
+    readonly providerID?: unknown
+    readonly id?: unknown
+  }
+  request: Request
+}
+
+function isRecord(
+  value: unknown,
+): value is Record<string, unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    !Array.isArray(value)
+  )
+}
+
+/*
+ * OpenCode's v2 runner removes every tool on an agent's final configured step
+ * and also sends tool_choice="none". Muse Spark through OpenCode Console only
+ * accepts the default/"auto" choice, so that otherwise safe text-only request
+ * fails before the model can return its final report.
+ *
+ * Omit only that unsupported wire field, and only after proving this is a
+ * primary request for one of our Muse agents with no tools. With no advertised
+ * tools, the provider's default "auto" mode cannot execute a tool, so the hard
+ * OpenCode step boundary remains intact. Any unfamiliar shape is left alone.
+ */
+export async function omitUnsupportedMuseFinalToolChoice(
+  input: MuseFinalHttpRequest,
+): Promise<boolean> {
+  if (
+    input.kind !== "primary" ||
+    typeof input.agent !== "string" ||
+    !input.agent.startsWith(ORCHESTRATOR_AGENT_PREFIX) ||
+    input.model?.providerID !== "opencode" ||
+    typeof input.model?.id !== "string" ||
+    !input.model.id.startsWith(MUSE_SPARK_MODEL_PREFIX) ||
+    input.request.method !== "POST" ||
+    !input.request.headers
+      .get("content-type")
+      ?.toLowerCase()
+      .includes("application/json")
+  ) {
+    return false
+  }
+
+  let body: unknown
+
+  try {
+    body = await input.request.clone().json()
+  } catch {
+    return false
+  }
+
+  if (
+    !isRecord(body) ||
+    body.tool_choice !== "none" ||
+    !(
+      body.tools === undefined ||
+      (Array.isArray(body.tools) && body.tools.length === 0)
+    )
+  ) {
+    return false
+  }
+
+  const rewritten = { ...body }
+  delete rewritten.tool_choice
+
+  const headers = new Headers(input.request.headers)
+  headers.delete("content-length")
+
+  input.request = new Request(input.request, {
+    body: JSON.stringify(rewritten),
+    headers,
+  })
+
+  return true
+}
+
 /*
  * OpenCode Console/Zen may route consecutive Muse Spark requests through
  * different upstream callers. Replaying the previous response's encrypted
@@ -1461,6 +1545,28 @@ export default Plugin.define({
       "context",
       (input) => {
         stripUnreplayableMuseReasoning(input)
+      },
+      { providerID: "opencode" },
+    )
+
+    await ctx.session.hook(
+      "http.request",
+      async (input) => {
+        if (
+          await omitUnsupportedMuseFinalToolChoice(input)
+        ) {
+          console.warn(
+            JSON.stringify({
+              event:
+                "opencode_orchestrator_muse_final_tool_choice_omitted",
+              sessionID: input.sessionID,
+              agent: input.agent,
+              model: input.model.id,
+              reason:
+                "provider_supports_only_auto_and_request_has_no_tools",
+            }),
+          )
+        }
       },
       { providerID: "opencode" },
     )

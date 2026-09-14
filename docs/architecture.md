@@ -47,7 +47,10 @@ orchestrator-owned OpenCode Muse Spark sessions. It removes hidden reasoning
 parts before a subsequent provider request so Console/Zen does not receive
 encrypted reasoning issued to a different upstream caller. Text and tool
 history remain available to the delegated agent; other agents and models are
-unchanged.
+unchanged. A provider HTTP-request hook also removes `tool_choice: "none"` only
+from a primary orchestrator Muse request whose tool list is absent or empty.
+This lets Console use its supported `auto` default for final synthesis without
+weakening the final-step tool prohibition.
 
 Provides the structured sandbox tools required by Worker and Runner.
 

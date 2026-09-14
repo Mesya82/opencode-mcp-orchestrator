@@ -72,9 +72,19 @@ finishes only after its cleanup deadline does not itself clear quarantine.
 
 ## Provider compatibility
 
-Observed: a Console provider rejected a non-`auto` `tool_choice` request with
-`invalid_request_error` (`only "auto" is supported for tool_choice`), surfaced
-as a session failure.
+OpenCode's v2 runner removes tools on the final configured agent step and sends
+`tool_choice: "none"` to force a text-only response. Console rejects that field
+with `invalid_request_error` (`only "auto" is supported for tool_choice`), so a
+delegated agent that exhausted its model steps could finish its edits but fail
+before returning the final report.
+
+The installed plugin now intercepts only primary provider requests for
+`opencode-orchestrator-*` agents using `opencode/muse-spark-*`. When the wire
+body requests `none` and its tools are absent or empty, the plugin removes the
+unsupported field. Console then uses its `auto` default, but no tool can be
+called because OpenCode already removed the tool definitions. Requests with
+remaining tools or an unfamiliar shape are left untouched and fail closed.
+The hard step limit and provider/session failure propagation remain intact.
 
 On 2026-09-13, Muse Spark through OpenCode Console/Zen also rejected continued
 tool-using sessions with `reasoning encrypted_content was not issued to this

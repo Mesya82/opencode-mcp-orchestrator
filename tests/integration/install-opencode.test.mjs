@@ -75,6 +75,16 @@ function installedAgent(testRoot, role) {
   )
 }
 
+function installedPlugin(testRoot) {
+  return readFileSync(
+    resolve(
+      testRoot,
+      "config/opencode/plugins/opencode-mcp-orchestrator/index.ts",
+    ),
+    "utf8",
+  )
+}
+
 test("installer renders default and custom step-limit profiles", () => {
   const testRoot =
     mkdtempSync(
@@ -107,6 +117,10 @@ test("installer renders default and custom step-limit profiles", () => {
     assert.match(
       installedAgent(testRoot, "runner-writable"),
       /by step 32 of 40/,
+    )
+    assert.match(
+      installedPlugin(testRoot),
+      /opencode_orchestrator_muse_final_tool_choice_omitted/,
     )
 
     writeConfig(
