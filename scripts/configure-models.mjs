@@ -62,6 +62,8 @@ const MODEL_ROLES = [
   "runner",
 ]
 
+const DEFAULT_VARIANT_CHOICE = Symbol("default-model-variant")
+
 function parseArgs(argv) {
   const result = {
     config: null,
@@ -708,11 +710,11 @@ async function chooseVariant({
 
   const chosen = await select({
     message: `Select variant for ${role} (${model})`,
-    default: currentIsValid ? current : "__default__",
+    default: currentIsValid ? current : undefined,
     choices: [
       {
         name: "Default — use OpenCode model default",
-        value: "__default__",
+        value: DEFAULT_VARIANT_CHOICE,
       },
       ...variants.map((variant) => ({
         name: variant,
@@ -721,7 +723,7 @@ async function chooseVariant({
     ],
   })
 
-  return chosen === "__default__"
+  return chosen === DEFAULT_VARIANT_CHOICE
     ? undefined
     : chosen
 }
