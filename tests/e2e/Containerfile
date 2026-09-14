@@ -32,4 +32,8 @@ COPY --chown=tester:tester \
   tests/e2e/mcp-probe.mjs \
   /e2e/mcp-probe.mjs
 
+COPY --chown=tester:tester \
+  tests/e2e/session-wait-refresh-probe.mjs \
+  /e2e/session-wait-refresh-probe.mjs
+
 ENTRYPOINT ["/e2e/run.sh"]

@@ -28,10 +28,12 @@ import {
   DEFAULT_BRIDGE_TIMEOUT_MS,
   getClient,
   mcpRequestSignal,
+  OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS,
   resetBridgeStateForTests,
   resolveBridgeTimeoutMs,
   resolveCanonicalCwd,
   resolveServerVersion,
+  resolveSessionWaitRefreshMs,
   runAgent as runAgentWithConfiguredBudget,
   SERVER_VERSION_FALLBACK,
   SESSION_WAIT_REFRESH_MS,
@@ -293,6 +295,41 @@ test("bridge timeout uses a conservative default with strict bounds", () => {
     resolveBridgeTimeoutMs({ [BRIDGE_TIMEOUT_ENV_VAR]: "3600000" }),
     3600000,
   )
+})
+
+test("session wait refresh env override resolves with strict bounds", () => {
+  assert.equal(
+    OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS,
+    "OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS",
+  )
+
+  const cases = [
+    [undefined, SESSION_WAIT_REFRESH_MS],
+    ["50", 50],
+    ["1", 1],
+    ["240000", 240000],
+    ["0", SESSION_WAIT_REFRESH_MS],
+    ["-5", SESSION_WAIT_REFRESH_MS],
+    ["12.5", SESSION_WAIT_REFRESH_MS],
+    ["nope", SESSION_WAIT_REFRESH_MS],
+    ["240001", SESSION_WAIT_REFRESH_MS],
+  ]
+
+  for (const [raw, expected] of cases) {
+    const env = raw === undefined
+      ? {}
+      : {
+          [OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS]: raw,
+        }
+
+    assert.equal(
+      resolveSessionWaitRefreshMs(env),
+      expected,
+      String(raw),
+    )
+  }
+
+  assert.equal(resolveSessionWaitRefreshMs({}), SESSION_WAIT_REFRESH_MS)
 })
 
 test("paths beneath /tmp remain valid directories", async () => {
