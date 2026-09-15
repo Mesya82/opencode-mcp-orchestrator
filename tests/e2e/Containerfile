@@ -1,15 +1,54 @@
+FROM node:24-bookworm AS bwrap-build
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    libcap-dev \
+    meson \
+    ninja-build \
+    pkg-config \
+    python3 \
+    xz-utils \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/bwrap-build
+
+RUN curl -fsSL -o bubblewrap-0.12.0.tar.xz \
+    https://github.com/containers/bubblewrap/releases/download/v0.12.0/bubblewrap-0.12.0.tar.xz \
+  && echo "9760d007363e3abba7c747489910f9f82d9fca53ba3bd3282e396fa3c97a3314  bubblewrap-0.12.0.tar.xz" \
+    | sha256sum -c - \
+  && tar -xf bubblewrap-0.12.0.tar.xz \
+  && meson setup builddir bubblewrap-0.12.0 \
+    --prefix=/usr \
+    -Dman=disabled \
+    -Dselinux=disabled \
+    -Dtests=false \
+    -Dbash_completion=disabled \
+    -Dzsh_completion=disabled \
+  && ninja -C builddir \
+  && DESTDIR=/bwrap-out ninja -C builddir install \
+  && /bwrap-out/usr/bin/bwrap --version \
+  && test "$(/bwrap-out/usr/bin/bwrap --version)" = "bubblewrap 0.12.0"
+
 FROM node:24-bookworm
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
-    bubblewrap \
     ca-certificates \
     curl \
     git \
     jq \
+    libcap2 \
     python3 \
     unzip \
   && rm -rf /var/lib/apt/lists/*
+
+COPY --from=bwrap-build /bwrap-out/usr/bin/bwrap /usr/bin/bwrap
+
+RUN /usr/bin/bwrap --version \
+  && test "$(/usr/bin/bwrap --version)" = "bubblewrap 0.12.0"
 
 RUN useradd \
   --create-home \
@@ -35,5 +74,29 @@ COPY --chown=tester:tester \
 COPY --chown=tester:tester \
   tests/e2e/session-wait-refresh-probe.mjs \
   /e2e/session-wait-refresh-probe.mjs
+
+COPY --chown=tester:tester \
+  tests/unit/linked-git-worktree.test.mjs \
+  /e2e/tests/unit/linked-git-worktree.test.mjs
+
+COPY --chown=tester:tester \
+  config/sandbox-bubblewrap.mjs \
+  /e2e/config/sandbox-bubblewrap.mjs
+
+COPY --chown=tester:tester \
+  config/sandbox-isolation.mjs \
+  /e2e/config/sandbox-isolation.mjs
+
+COPY --chown=tester:tester \
+  config/sandbox-probes.mjs \
+  /e2e/config/sandbox-probes.mjs
+
+COPY --chown=tester:tester \
+  config/sandbox-runtime.mjs \
+  /e2e/config/sandbox-runtime.mjs
+
+COPY --chown=tester:tester \
+  installer/path-security.mjs \
+  /e2e/installer/path-security.mjs
 
 ENTRYPOINT ["/e2e/run.sh"]
