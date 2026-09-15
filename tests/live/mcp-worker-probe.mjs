@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join, realpath } from "node:path"
+import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import { Client } from "@modelcontextprotocol/client"
 import { StdioClientTransport } from "@modelcontextprotocol/client/stdio"
@@ -73,7 +73,7 @@ try {
         task: [
           "Perform exactly this bounded implementation task:",
           "1. Create worker-probe.txt in the repository root containing exactly STABLE-V2-WORKER-PASS followed by one newline.",
-          "2. Use sandbox_shell to run: test \"$(cat worker-probe.txt)\" = STABLE-V2-WORKER-PASS", 
+          "2. Use sandbox_shell to run: test \"$(cat worker-probe.txt)\" = STABLE-V2-WORKER-PASS",
           "3. Do not modify any other file.",
           "4. Do not perform any Git mutation.",
           "Return a concise final response after verification.",
