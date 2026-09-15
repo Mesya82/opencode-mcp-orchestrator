@@ -24,6 +24,10 @@ import {
   hasNetworklessIsolation,
 } from "../../config/sandbox-isolation.mjs"
 
+import {
+  safeSystemPath,
+} from "../../config/sandbox-bubblewrap.mjs"
+
 function makeRuntime() {
   const dir = mkdtempSync(join(tmpdir(), "sandbox-probe-runtime-"))
   const root = join(dir, "runtime")
@@ -113,9 +117,11 @@ test("worker workspace is writable while runner is read-only and tmp stays writa
   const runner = buildRunnerProbeArgv(ws)
   assert.ok(runner.includes("--tmpfs"))
   assert.ok(runner.includes("/tmp"))
-  assert.ok(runner[runner.length - 1].includes("/tmp/probe-tmp.txt"))
+  const runnerScript = runner[runner.indexOf("-c") + 1]
+  assert.ok(runnerScript.includes("/tmp/probe-tmp.txt"))
   const worker = buildWorkerProbeArgv(ws)
-  assert.ok(worker[worker.length - 1].includes("probe-write.txt"))
+  const workerScript = worker[worker.indexOf("-c") + 1]
+  assert.ok(workerScript.includes("probe-write.txt"))
 })
 
 test("trusted runtime roots appear in PATH, binds, and environment", () => {
@@ -125,10 +131,10 @@ test("trusted runtime roots appear in PATH, binds, and environment", () => {
     pathEntries: [],
     environment: {},
   })
-  assert.equal(probeSandboxPath({ trustedRoots: [] }), SANDBOX_PROBE_BASE_PATH)
+  assert.equal(probeSandboxPath({ trustedRoots: [] }), safeSystemPath())
 
   withRuntime(({ root, bin, data, home, runtime }) => {
-    assert.equal(probeSandboxPath(runtime), `${SANDBOX_PROBE_BASE_PATH}:${bin}`)
+    assert.equal(probeSandboxPath(runtime), `${safeSystemPath()}:${bin}`)
 
     for (const argv of [
       buildWorkerProbeArgv(ws, runtime),
@@ -190,6 +196,21 @@ test("trusted runtime roots receive canonicalization, containment, and ownership
       /invalid sandbox runtime configuration/,
     )
   })
+})
+
+test("absent optional etc/git files pass but present git without overlays rejects", () => {
+  const ws = "/tmp/ws-probe"
+  const argv = buildWorkerProbeArgv(ws)
+  // Real-fs default: optional files missing on the host (e.g. /etc/gitconfig,
+  // workspace .git) are skipped on both sides, not falsely rejected.
+  assert.deepEqual(probeSandboxArgvInvariants(argv, ws, undefined), [])
+  // Same argv with git metadata present but no RO overlays must still reject.
+  assert.deepEqual(
+    probeSandboxArgvInvariants(argv, ws, undefined, {
+      existsSync: (path) => (path === `${ws}/.git` ? true : existsSync(path)),
+    }),
+    ["missing git protection"],
+  )
 })
 
 test("unknown probe kind fails closed", () => {

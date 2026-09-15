@@ -14,10 +14,11 @@
  */
 
 import {
+  existsSync as fsExistsSync,
+  mkdirSync,
   mkdtempSync,
-  realpathSync as fsRealpathSync,
   rmSync,
-  statSync as fsStatSync,
+  writeFileSync,
 } from "node:fs"
 
 import {
@@ -26,10 +27,6 @@ import {
 
 import {
   join,
-  relative,
-  resolve,
-  sep,
-  isAbsolute,
 } from "node:path"
 
 import {
@@ -37,13 +34,22 @@ import {
 } from "node:child_process"
 
 import {
-  sandboxIsolationArgv,
   hasNetworklessIsolation,
 } from "./sandbox-isolation.mjs"
 
 import {
   normalizeSandboxRuntime,
 } from "./sandbox-runtime.mjs"
+
+import {
+  SANDBOX_ETC_RO_BINDS,
+  buildBaseSandboxArgv,
+  resolveSandboxRuntimeCapabilities,
+  resolveSandboxToolchainDirs,
+  runnerOutputBindArgs,
+  safeSystemPath,
+  sandboxPathWithToolchains,
+} from "./sandbox-bubblewrap.mjs"
 
 import {
   SUBPROCESS_PROBE_TIMEOUT_MS,
@@ -71,45 +77,6 @@ export const SANDBOX_PROBE_KINDS = Object.freeze([
 
 export const SANDBOX_PROBE_BASE_PATH = "/usr/bin:/bin"
 
-const PROBE_ENV_KEY_PATTERN = /^[A-Z_][A-Z0-9_]*$/
-
-const PROBE_FORBIDDEN_EXACT = new Set([
-  "/",
-  "/home",
-  "/tmp",
-  "/usr",
-  "/etc",
-  "/proc",
-  "/dev",
-  "/bin",
-  "/boot",
-  "/sbin",
-  "/lib",
-  "/lib64",
-  "/media",
-  "/mnt",
-  "/opt",
-  "/root",
-  "/srv",
-  "/var",
-])
-
-const PROBE_FORBIDDEN_PREFIXES = ["/dev", "/etc", "/proc", "/run", "/sys"]
-
-const PROBE_HOME_SENSITIVE = [
-  ".agents",
-  ".aws",
-  ".azure",
-  ".claude",
-  ".codex",
-  ".config",
-  ".docker",
-  ".gnupg",
-  ".kube",
-  ".password-store",
-  ".ssh",
-]
-
 export const SANDBOX_PROBE_FAILURE_REASONS = Object.freeze([
   "exit-nonzero",
   "timeout",
@@ -132,36 +99,6 @@ export function probeFailureDetail(kind, reason) {
   return `${safeKind} probe failed`
 }
 
-function isWithinProbeRoot(root, candidate) {
-  const rel = relative(root, candidate)
-  return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
-}
-
-function canonicalHomeProbe(home, realpathFn) {
-  if (!home) return undefined
-  try {
-    return realpathFn(home)
-  } catch {
-    return undefined
-  }
-}
-
-function isForbiddenProbeRoot(canonical, home) {
-  if (PROBE_FORBIDDEN_EXACT.has(canonical)) return true
-  if (PROBE_FORBIDDEN_PREFIXES.some((prefix) => isWithinProbeRoot(prefix, canonical))) return true
-  if (canonical.split(sep).includes(".git")) return true
-  if (PROBE_HOME_SENSITIVE.some((sensitive) => canonical.split(sep).includes(sensitive))) return true
-  if (!home) return false
-  if (canonical === home) return true
-  return PROBE_HOME_SENSITIVE.some((sensitive) =>
-    isWithinProbeRoot(resolve(home, sensitive), canonical),
-  )
-}
-
-function invalidProbeRuntime() {
-  return new Error("invalid sandbox runtime configuration")
-}
-
 export function sanitizeProbeDetail(value) {
   if (typeof value !== "string") return ""
   let text = ""
@@ -176,118 +113,82 @@ export function sanitizeProbeDetail(value) {
 
 /*
  * Project the configured sandboxRuntime into probe mounts/PATH/environment
- * with the same filesystem validation delegated sandboxes consume
- * (canonicalization, symlink resolution, containment, directory and
- * broad/sensitive-root checks). Normalization alone is not trusted.
- * The input is re-normalized so unvalidated caller shapes fail closed
- * instead of being mounted verbatim.
+ * through the shared production filesystem validation (canonicalization,
+ * symlink resolution, containment, directory and broad/sensitive-root
+ * checks). The input is re-normalized so unvalidated caller shapes fail
+ * closed instead of being mounted verbatim. Production failures carry
+ * detailed messages; probes redact them to the fixed invalid-runtime
+ * category.
  */
 export function resolveProbeRuntimeBindings(sandboxRuntime, options = {}) {
   const normalized = normalizeSandboxRuntime(
     sandboxRuntime ?? { trustedRoots: [] },
   )
-  const realpathFn = options.realpathSync ?? fsRealpathSync
-  const statFn = options.statSync ?? fsStatSync
-  const home = "home" in options ? options.home : process.env.HOME
-  const canonicalHome = canonicalHomeProbe(home, realpathFn)
-
-  const mountRoots = []
-  const pathEntries = []
-  const environment = {}
-  const seenRoots = new Set()
-  const seenPaths = new Set()
-
-  for (const entry of normalized.trustedRoots) {
-    let root
-    try {
-      root = realpathFn(entry.root)
-    } catch {
-      throw invalidProbeRuntime()
-    }
-    let info
-    try {
-      info = statFn(root)
-    } catch {
-      throw invalidProbeRuntime()
-    }
-    if (!info.isDirectory()) throw invalidProbeRuntime()
-    if (isForbiddenProbeRoot(root, canonicalHome)) throw invalidProbeRuntime()
-    if (seenRoots.has(root)) throw invalidProbeRuntime()
-    seenRoots.add(root)
-    mountRoots.push(root)
-
-    for (const relativePath of entry.pathEntries) {
-      let canonical
-      try {
-        canonical = realpathFn(resolve(root, relativePath))
-      } catch {
-        throw invalidProbeRuntime()
-      }
-      if (!isWithinProbeRoot(root, canonical)) throw invalidProbeRuntime()
-      let pathInfo
-      try {
-        pathInfo = statFn(canonical)
-      } catch {
-        throw invalidProbeRuntime()
-      }
-      if (!pathInfo.isDirectory()) throw invalidProbeRuntime()
-      if (seenPaths.has(canonical)) throw invalidProbeRuntime()
-      seenPaths.add(canonical)
-      pathEntries.push(canonical)
-    }
-
-    for (const [name, relativePath] of Object.entries(entry.environment)) {
-      if (!PROBE_ENV_KEY_PATTERN.test(name)) continue
-      let canonical
-      try {
-        canonical = realpathFn(resolve(root, relativePath))
-      } catch {
-        throw invalidProbeRuntime()
-      }
-      if (!isWithinProbeRoot(root, canonical)) throw invalidProbeRuntime()
-      environment[name] = canonical
-    }
+  try {
+    return resolveSandboxRuntimeCapabilities({
+      config: normalized,
+      env: "home" in options
+        ? { ...process.env, HOME: options.home }
+        : process.env,
+      realpathSync: options.realpathSync,
+      statSync: options.statSync,
+    })
+  } catch {
+    throw new Error("invalid sandbox runtime configuration")
   }
+}
 
-  return { mountRoots, pathEntries, environment }
+function probeProductionInputs(sandboxRuntime, options = {}) {
+  const normalized = normalizeSandboxRuntime(
+    sandboxRuntime ?? { trustedRoots: [] },
+  )
+  let runtime
+  try {
+    runtime = resolveSandboxRuntimeCapabilities({
+      config: normalized,
+      env: "home" in options
+        ? { ...process.env, HOME: options.home }
+        : process.env,
+      realpathSync: options.realpathSync,
+      statSync: options.statSync,
+    })
+  } catch {
+    throw new Error("invalid sandbox runtime configuration")
+  }
+  let toolchainDirs = []
+  try {
+    toolchainDirs = resolveSandboxToolchainDirs(
+      undefined,
+      {
+        env: options.env,
+        delimiter: options.delimiter,
+        realpathSync: options.realpathSync,
+        statSync: options.statSync,
+        ...("home" in options ? { home: options.home } : {}),
+      },
+    )
+  } catch {
+    throw new Error("invalid sandbox runtime configuration")
+  }
+  const safePath = safeSystemPath({
+    path: options.path,
+    delimiter: options.delimiter,
+    env: options.env,
+    realpathSync: options.realpathSync,
+    statSync: options.statSync,
+  })
+  return { runtime, toolchainDirs, safePath }
 }
 
 export function probeSandboxPath(sandboxRuntime, options = {}) {
-  const { pathEntries } = resolveProbeRuntimeBindings(sandboxRuntime, options)
-  if (pathEntries.length === 0) return SANDBOX_PROBE_BASE_PATH
-  return `${SANDBOX_PROBE_BASE_PATH}:${pathEntries.join(":")}`
-}
-
-function pushProbeRuntimeBinds(argv, sandboxRuntime, options = {}) {
-  const { mountRoots } = resolveProbeRuntimeBindings(sandboxRuntime, options)
-
-  for (const root of mountRoots) {
-    argv.push("--ro-bind", root, root)
-  }
-}
-
-function pushProbeEnv(argv, sandboxRuntime, options = {}) {
-  const { environment } = resolveProbeRuntimeBindings(sandboxRuntime, options)
-
-  argv.push(
-    "--clearenv",
-    "--setenv",
-    "HOME",
-    "/home/sandbox",
-    "--setenv",
-    "PATH",
-    probeSandboxPath(sandboxRuntime, options),
-    "--setenv",
-    "LANG",
-    "C.UTF-8",
-    "--setenv",
-    "LC_ALL",
-    "C.UTF-8",
+  const { runtime, toolchainDirs, safePath } = probeProductionInputs(
+    sandboxRuntime,
+    options,
   )
-
-  for (const [name, value] of Object.entries(environment)) {
-    argv.push("--setenv", name, value)
-  }
+  return sandboxPathWithToolchains(
+    safePath,
+    [...runtime.pathEntries, ...toolchainDirs],
+  )
 }
 
 export function probeWorkspacePrefix() {
@@ -295,7 +196,13 @@ export function probeWorkspacePrefix() {
 }
 
 export function createProbeWorkspace() {
-  return mkdtempSync(probeWorkspacePrefix())
+  const workspace = mkdtempSync(probeWorkspacePrefix())
+  // Disposable Git metadata overlay: ensure the shared production .git
+  // read-only overlays are actually exercised through both workspace paths.
+  const gitDir = join(workspace, ".git")
+  mkdirSync(gitDir, { recursive: true })
+  writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/probe\n")
+  return workspace
 }
 
 export function cleanupProbeWorkspace(path) {
@@ -307,96 +214,74 @@ export function cleanupProbeWorkspace(path) {
 }
 
 /*
- * Effective Worker construction: writable workspace, matching sandbox_shell.
- * Only the disposable probe workspace is exposed; never the repository or
- * host HOME.
+ * Effective Worker construction: the production Bubblewrap builder with a
+ * writable workspace, matching sandbox_shell. The disposable probe workspace
+ * plays the role of the per-call session worktree: it is exposed both at
+ * /workspace and at its absolute host path, with Git metadata (a probe
+ * marker file) overlaid read-only through both paths exactly like
+ * production. Only the disposable probe workspace is exposed; never the
+ * repository or host HOME.
  */
 export function buildWorkerProbeArgv(workspace, sandboxRuntime, options = {}) {
-  const argv = [
-    "/usr/bin/bwrap",
-    ...sandboxIsolationArgv(),
-    "--ro-bind",
-    "/usr",
-    "/usr",
-    "--symlink",
-    "usr/bin",
-    "/bin",
-    "--symlink",
-    "usr/lib",
-    "/lib",
-    "--symlink",
-    "usr/lib64",
-    "/lib64",
-    "--proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/tmp",
-    "--dir",
-    "/etc",
-    "--bind",
+  const { runtime, toolchainDirs, safePath } = probeProductionInputs(
+    sandboxRuntime,
+    options,
+  )
+  const argv = buildBaseSandboxArgv(
     workspace,
     "/workspace",
-  ]
-
-  pushProbeRuntimeBinds(argv, sandboxRuntime, options)
-  pushProbeEnv(argv, sandboxRuntime, options)
+    {
+      readonlyWorkspace: false,
+      runtime,
+      toolchainDirs,
+      safePath,
+    },
+  )
 
   argv.push(
-    "--chdir",
-    "/workspace",
     "/bin/sh",
     "-c",
-    "printf probe-ok > probe-write.txt && test \"$(cat probe-write.txt)\" = probe-ok",
+    "printf probe-ok > probe-write.txt && test \"$(cat probe-write.txt)\" = probe-ok && printf probe-ok > \"$0/probe-abs.txt\" && test \"$(cat \"$0/probe-abs.txt\")\" = probe-ok && { if printf x >> .git/HEAD 2>/dev/null; then exit 1; fi; } && { if printf x >> \"$0/.git/HEAD\" 2>/dev/null; then exit 1; fi; } && test ! -w .git/HEAD",
+    workspace,
   )
 
   return argv
 }
 
 /*
- * Effective Runner construction: read-only workspace with writable
- * sandbox-private locations, matching sandbox_run_ro. The disposable
+ * Effective Runner construction: the production Bubblewrap builder with a
+ * read-only workspace, matching sandbox_run_ro. The disposable
  * workspace write must fail while /tmp stays writable.
  */
 export function buildRunnerProbeArgv(workspace, sandboxRuntime, options = {}) {
-  const argv = [
-    "/usr/bin/bwrap",
-    ...sandboxIsolationArgv(),
-    "--ro-bind",
-    "/usr",
-    "/usr",
-    "--symlink",
-    "usr/bin",
-    "/bin",
-    "--symlink",
-    "usr/lib",
-    "/lib",
-    "--symlink",
-    "usr/lib64",
-    "/lib64",
-    "--proc",
-    "/proc",
-    "--dev",
-    "/dev",
-    "--tmpfs",
-    "/tmp",
-    "--dir",
-    "/etc",
-    "--ro-bind",
+  const { runtime, toolchainDirs, safePath } = probeProductionInputs(
+    sandboxRuntime,
+    options,
+  )
+  const runDir = options.runDir ?? join(workspace, "..", "probe-runner-output")
+  const argv = buildBaseSandboxArgv(
     workspace,
     "/workspace",
-  ]
-
-  pushProbeRuntimeBinds(argv, sandboxRuntime, options)
-  pushProbeEnv(argv, sandboxRuntime, options)
+    {
+      readonlyWorkspace: true,
+      runtime,
+      toolchainDirs,
+      safePath,
+    },
+  )
 
   argv.push(
-    "--chdir",
-    "/workspace",
+    ...runnerOutputBindArgs(runDir),
+
     "/bin/sh",
     "-c",
-    "if printf probe-fail > probe-write.txt 2>/dev/null; then exit 1; fi; printf tmp-ok > /tmp/probe-tmp.txt && test \"$(cat /tmp/probe-tmp.txt)\" = tmp-ok",
+    "if printf probe-fail > probe-write.txt 2>/dev/null; then exit 1; fi; "
+    + "if printf probe-fail > \"$0/probe-abs.txt\" 2>/dev/null; then exit 1; fi; "
+    + "{ if printf x >> .git/HEAD 2>/dev/null; then exit 1; fi; }; "
+    + "{ if printf x >> \"$0/.git/HEAD\" 2>/dev/null; then exit 1; fi; }; "
+    + "printf runner-ok > /runner-output/probe-out.txt && test \"$(cat /runner-output/probe-out.txt)\" = runner-ok && "
+    + "printf tmp-ok > /tmp/probe-tmp.txt && test \"$(cat /tmp/probe-tmp.txt)\" = tmp-ok",
+    workspace,
   )
 
   return argv
@@ -408,7 +293,7 @@ export function buildSandboxProbeArgv(kind, workspace, sandboxRuntime, options =
   throw new Error(probeFailureDetail("worker", "unknown-probe"))
 }
 
-export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime) {
+export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime, options = {}) {
   if (!Array.isArray(argv) || argv.length === 0) {
     return ["empty probe argv"]
   }
@@ -428,15 +313,30 @@ export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime) {
     return ["mounts host HOME"]
   }
 
-  let allowedExtra = []
+  let runtime
+  let toolchainDirs = []
 
   try {
-    allowedExtra = resolveProbeRuntimeBindings(sandboxRuntime).mountRoots
+    const inputs = probeProductionInputs(sandboxRuntime, options)
+    runtime = inputs.runtime
+    toolchainDirs = inputs.toolchainDirs
   } catch {
     return ["invalid sandbox runtime configuration"]
   }
 
-  const allowed = new Set([workspace, "/usr", ...allowedExtra])
+  const allowedMountRoots = new Set([...runtime.mountRoots, ...toolchainDirs])
+  const allowed = new Set([workspace, "/usr", ...allowedMountRoots])
+
+  // Exact expected Runner output source: supplied runDir, or the deterministic
+  // builder default for side-effect-free direct builder API tests.
+  const expectedRunDir = options.runDir ?? join(workspace, "..", "probe-runner-output")
+
+  for (const path of SANDBOX_ETC_RO_BINDS) {
+    allowed.add(path)
+  }
+
+  const workspaceGit = `${workspace}/.git`
+  allowed.add(workspaceGit)
 
   const hasAlias = (link, target) => {
     for (let index = 0; index + 2 < argv.length; index += 1) {
@@ -449,18 +349,116 @@ export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime) {
     return ["missing system aliases"]
   }
 
-  // Never expose anything besides the disposable workspace, /usr, and the
-  // configured trusted runtime roots.
+  // Expected production binds: exactly the fixed /etc RO set that exists,
+  // only when the caller-supplied existence check agrees. Default to the
+  // real filesystem so optional files (e.g. /etc/gitconfig) missing on the
+  // host do not falsely reject, while present files without RO overlays
+  // still reject via the seen/expected comparison below.
+  const existsFn = options.existsSync ?? fsExistsSync
+  const expectedEtc = new Set(
+    SANDBOX_ETC_RO_BINDS.filter((path) => existsFn(path)),
+  )
+  const seenEtc = new Set()
+
+  let workspaceBindFlag
+  let absoluteBindFlag
+  let aliasGitCount = 0
+  let absGitCount = 0
+  let runnerOutputFlag
+  let runnerOutputSource
+
+  // Never expose anything besides the disposable workspace, /usr, the fixed
+  // /etc RO set, the protected .git overlays, and validated configured
+  // toolchain/runtime roots. Unsafe broad binds fail closed here rather than
+  // being suppressed.
   for (let index = 0; index + 2 < argv.length; index += 1) {
     const flag = argv[index]
     if (flag !== "--bind" && flag !== "--ro-bind") continue
     const source = argv[index + 1]
-    if (allowed.has(source)) continue
+    const target = argv[index + 2]
+    if (expectedEtc.has(source) && source === target && flag === "--ro-bind") {
+      seenEtc.add(source)
+      continue
+    }
+    if (source === workspace && target === "/workspace") {
+      workspaceBindFlag = flag
+      continue
+    }
+    if (source === workspace && target === workspace) {
+      absoluteBindFlag = flag
+      continue
+    }
+    if (source === workspaceGit && target === "/workspace/.git" && flag === "--ro-bind") {
+      aliasGitCount += 1
+      continue
+    }
+    if (source === workspaceGit && target === workspaceGit && flag === "--ro-bind") {
+      absGitCount += 1
+      continue
+    }
+    if (target === "/runner-output") {
+      if (flag !== "--bind" || source !== expectedRunDir) {
+        return ["unexpected bind source"]
+      }
+      if (runnerOutputFlag !== undefined) {
+        return ["unexpected bind source"]
+      }
+      runnerOutputFlag = flag
+      runnerOutputSource = source
+      continue
+    }
+    if (allowed.has(source) && source === target && flag === "--ro-bind") continue
     return ["unexpected bind source"]
   }
 
   if (!argv.includes(workspace)) {
     return ["missing disposable workspace"]
+  }
+
+  if (workspaceBindFlag === undefined || absoluteBindFlag === undefined) {
+    return ["missing disposable workspace"]
+  }
+
+  // The absolute host-path alias must duplicate the /workspace bind exactly.
+  if (workspaceBindFlag !== absoluteBindFlag) {
+    return ["workspace alias mismatch"]
+  }
+
+  // Git metadata must be protected read-only through both workspace paths.
+  const gitExists = existsFn(workspaceGit)
+  if (gitExists && (aliasGitCount !== 1 || absGitCount !== 1)) {
+    return ["missing git protection"]
+  }
+  if (!gitExists && (aliasGitCount > 0 || absGitCount > 0)) {
+    return ["unexpected bind source"]
+  }
+
+  for (const path of expectedEtc) {
+    if (!seenEtc.has(path)) return ["missing etc bind"]
+  }
+  for (const path of seenEtc) {
+    if (!expectedEtc.has(path)) return ["unexpected bind source"]
+  }
+
+  // Runner probes must keep the production writable output mount.
+  // RO mode (runner) requires the exact expected output source; RW mode
+  // (worker) must not mount an output directory at all.
+  const isReadonly = workspaceBindFlag === "--ro-bind"
+  const kindHint = options.kind === "runner" || options.kind === "worker"
+    ? options.kind
+    : undefined
+  const requiresOutput = kindHint !== undefined
+    ? kindHint === "runner"
+    : isReadonly
+  if (requiresOutput) {
+    if (runnerOutputFlag === undefined) {
+      return ["runner output not writable"]
+    }
+    if (runnerOutputSource !== expectedRunDir) {
+      return ["unexpected bind source"]
+    }
+  } else if (runnerOutputFlag !== undefined) {
+    return ["unexpected bind source"]
   }
 
   return []
@@ -480,13 +478,36 @@ export function runSandboxProbe(
   if (kind !== "worker" && kind !== "runner") {
     return { ok: false, detail: probeFailureDetail(safeKind, "unknown-probe") }
   }
-  const created = workspace === undefined
-  const activeWorkspace = workspace ?? createProbeWorkspace()
+  let activeWorkspace
+  let created = workspace === undefined
+  try {
+    activeWorkspace = workspace ?? createProbeWorkspace()
+  } catch {
+    return { ok: false, detail: probeFailureDetail(safeKind, "spawn-error") }
+  }
+
+  // Runner probes use a unique private output directory per call; never a
+  // shared global probe-runner-output. Allocated here so spawn failures,
+  // throws, timeouts, and invalid argv still clean up via finally below.
+  let runDir
+  if (kind === "runner") {
+    try {
+      runDir = mkdtempSync(join(tmpdir(), "doctor-runner-output-"))
+    } catch {
+      if (created) cleanupProbeWorkspace(activeWorkspace)
+      return { ok: false, detail: probeFailureDetail(safeKind, "spawn-error") }
+    }
+  }
 
   try {
     let argv
     try {
-      argv = buildSandboxProbeArgv(kind, activeWorkspace, sandboxRuntime)
+      argv = buildSandboxProbeArgv(
+        kind,
+        activeWorkspace,
+        sandboxRuntime,
+        kind === "runner" ? { runDir } : undefined,
+      )
     } catch {
       return { ok: false, detail: probeFailureDetail(safeKind, "invalid-runtime") }
     }
@@ -497,6 +518,7 @@ export function runSandboxProbe(
         argv,
         activeWorkspace,
         sandboxRuntime,
+        kind === "runner" ? { runDir, kind } : { kind },
       )
     } catch {
       return { ok: false, detail: probeFailureDetail(safeKind, "invalid-runtime") }
@@ -538,5 +560,6 @@ export function runSandboxProbe(
     }
   } finally {
     if (created) cleanupProbeWorkspace(activeWorkspace)
+    if (runDir !== undefined) cleanupProbeWorkspace(runDir)
   }
 }

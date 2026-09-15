@@ -189,8 +189,25 @@ exposure, and installed-bundle regression coverage.
 
 ## Remaining work from this review lineage
 
-All nine original findings are fixed. Remaining work consists of ongoing
-regression coverage and explicitly deferred scope:
+The nine original findings have source fixes. PR #5's Doctor readiness work
+still has a review/verification gate; it is not merge-ready. Remaining work
+consists of that gate, ongoing regression coverage, and explicitly deferred
+scope:
+
+- PR #5 review follow-up (2026-09-15): the Docker clean-container job failed
+  at the required networkless Bubblewrap preflight, and Doctor independently
+  reconstructed production sandbox arguments. A disposable GitHub-hosted-only
+  user-namespace-policy wrapper is implemented locally with passing mocked
+  success/failure/restoration tests and is wired into E2E and release workflows.
+  The production/Doctor shared-builder refactor is now complete locally after
+  splitting the failed Worker task into small, explicitly authorized packets.
+  Both callers share mount/environment construction, runtime/toolchain checks
+  and Runner output binding. Concrete argv equivalence tests cover empty and
+  configured runtime/toolchain cases. Git-write checks fail immediately on a
+  forbidden write through either alias; Runner output is unique and always
+  cleaned up. Full build/unit/integration tests, typecheck and both real host
+  probes pass. Obtain green Docker E2E on the updated PR head before closing
+  this gate; host evidence alone does not resolve the clean-container concern.
 
 1. Continue live cancellation and installed-bundle regression coverage as the
    bridge lifecycle evolves.

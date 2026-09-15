@@ -393,6 +393,70 @@ not make the source diagnosis or fix uncertain.
 Removal/recheck criteria: remove this note only after the per-session fix
 lands and the two-worktree sandbox-run/Git-status regression passes.
 
+## 2026-09-15 — PR #5 review fixes: partial Worker handoff
+
+The review identified two separate issues: Docker E2E fails before installed
+Doctor probes execute (`loopback: Failed RTM_NEWADDR: Operation not permitted`),
+and Doctor's independently constructed sandbox can drift from production.
+
+Docker diagnosis: Ubuntu's host AppArmor user-namespace policy is a plausible
+remaining restriction despite the container's `apparmor=unconfined` setting.
+See the analogous [sandbox-runtime report](https://github.com/anthropics/sandbox-runtime/issues/74).
+This explanation remains to be confirmed by a new GitHub run. A Worker created
+`tests/e2e/github-userns.sh` and mocked regression tests in an isolated scratch
+directory. Root integrated them and tightened explicit missing-key detection
+and signal restoration. The wrapper refuses outside disposable GitHub-hosted
+runners, temporarily adjusts only the user-namespace sysctl for the entire E2E
+command, and restores/verifies the exact prior value. Local wrapper tests and
+shell syntax pass. No local host policy was changed. Networkless preflight and
+Doctor probes remain mandatory; no capabilities, privileged container or skip
+was added. The new Docker run has not occurred and these changes are unpushed.
+
+Shared-builder Worker failures:
+
+- First session `ses_f5c567bb6ffehSXSDSTwbCpMty` created the shared `.mjs`
+  builder/declarations and partial production/Doctor wiring, then failed with
+  provider Console `invalid_request_error`: only `auto` is supported for
+  `tool_choice`; `none`, `required`, and named choices are unsupported.
+- One materially narrower retry, `ses_f5c4c5767ffeaiQeN714FFaAzp`, completed
+  more probe wiring but failed with the same final-step error. No further
+  retry or silent direct implementation was performed.
+- Runner's verification-boundary check could not see the new shared module;
+  its `/workspace` result was not accepted as evidence for this worktree.
+
+Root checked the preserved partial patch in the requested worktree:
+`npm run typecheck`, `git diff --check`, wrapper tests and wrapper syntax pass.
+`npm test` fails at `tests/unit/sandbox-probes.test.mjs`; direct focused execution
+reports 6 passing and 5 failing cases. Failures include missing Git-protection
+overlays in old fixtures, changed command-tail layout and safe PATH expectations,
+and probe invariant rejection before the mocked spawn/failure path. Required
+production/Doctor equivalence tests have not been added. The draft Git-write
+checks using `write && exit 1 || true` can swallow a successful forbidden write
+and must be corrected, not merely accommodated by changed test expectations.
+
+Handoff: shared-builder changes remain uncommitted and unpushed. Complete the
+refactor and equivalence tests, exercise real Worker/Runner probes with Git and
+both workspace aliases protected, then push and require green CI/Docker E2E.
+Provider/profile recovery or explicit root takeover is needed before resuming
+implementation after the failed narrower retry.
+
+### Recovery with smaller prompts
+
+The user explicitly requested another prompt after the narrower retry failed.
+Four small Worker packets subsequently returned successfully without changing
+model or configured limits: (1) fixed Git-write checks plus focused regressions,
+(2) real existence checks and old test expectation migration, (3) unique Runner
+output lifecycle and exact output-bind validation, and (4) tests-only concrete
+production/Doctor argument equivalence. Verification shells still used another
+checkout, so their unavailable test results were not accepted. Root executed
+acceptance checks in the requested worktree: full build/unit/integration suite,
+typecheck, focused equivalence/Git/output tests and real provider-free Worker
+and Runner host probes all pass. Root also removed an unused draft helper.
+
+The prior partial-patch handoff above is historical, not the current source
+status. The remaining review gate is a green Docker clean-container run on the
+updated PR head. Keep this gate explicit; do not merge based only on host probes.
+
 ## Upstream audit finding with no available fix
 
 As of 2026-09-12, `npm audit` reports 11 moderate, 0 high, and
