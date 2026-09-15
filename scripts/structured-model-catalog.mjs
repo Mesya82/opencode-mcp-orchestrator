@@ -1,6 +1,15 @@
 export const STRUCTURED_CATALOG_ATTEMPTS = 3
 export const STRUCTURED_CATALOG_RETRY_BASE_DELAY_MS = 500
 
+function isExplicitEmptyModelCatalog(stdout) {
+  try {
+    const parsed = JSON.parse(stdout)
+    return Array.isArray(parsed?.data) && parsed.data.length === 0
+  } catch {
+    return false
+  }
+}
+
 function attemptFailureReason({
   result,
   stdout,
@@ -53,7 +62,8 @@ export function discoverStructuredModelCatalog({
       !isTimeout(result) &&
       !result?.error &&
       result?.status === 0 &&
-      stdout.trim() !== ""
+      stdout.trim() !== "" &&
+      !isExplicitEmptyModelCatalog(stdout)
     ) {
       entries = parse(stdout)
 

@@ -26,7 +26,9 @@ Different roles may use different variants even when they use the same model. Fo
 
 `modelVariants` is optional and role entries are optional. Existing configurations that only contain `models` remain valid and preserve the previous behavior.
 
-If the structured OpenCode catalog is unavailable but the historical `opencode models` command still works, configuration falls back to that model list. In that compatibility mode the installer does not guess variant names. Existing variant selections are preserved for unchanged models; newly selected models use the OpenCode default until structured variant metadata becomes available again.
+OpenCode V2 stable may expose a healthy structured `/api/model` endpoint while returning an empty catalog. The configurator treats an empty or otherwise unusable structured catalog the same as unavailable variant metadata and falls back to the `opencode models` command. This is an expected compatibility path, not a reason to invent provider, model, or variant data.
+
+In fallback mode the installer does not guess variant names. Existing variant selections are preserved for unchanged models; newly selected models use the OpenCode default until structured variant metadata becomes available again.
 
 At runtime the selected role is sent to OpenCode as:
 
