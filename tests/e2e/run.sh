@@ -50,6 +50,12 @@ test -f "$RELEASE_DIR/$ARCHIVE" || \
   fail "release archive missing: $ARCHIVE"
 
 echo
+echo "=== BUBBLEWRAP PREFLIGHT ==="
+
+/usr/bin/bwrap --die-with-parent --new-session --unshare-net --unshare-pid --unshare-ipc --unshare-uts --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp --clearenv /bin/sh -c true
+echo NESTED_BWRAP_NETLESS_OK
+
+echo
 echo "=== INSTALL LATEST CLIENTS ==="
 
 echo
