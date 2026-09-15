@@ -26,12 +26,14 @@ import {
   createServer,
   createToolHandlers,
   DEFAULT_BRIDGE_TIMEOUT_MS,
+  E2E_SESSION_WAIT_REFRESH_ENV_VAR,
   getClient,
   mcpRequestSignal,
   resetBridgeStateForTests,
   resolveBridgeTimeoutMs,
   resolveCanonicalCwd,
   resolveServerVersion,
+  resolveSessionWaitRefreshMs,
   runAgent as runAgentWithConfiguredBudget,
   SERVER_VERSION_FALLBACK,
   SESSION_WAIT_REFRESH_MS,
@@ -908,6 +910,43 @@ test("wait refreshes do not extend runAgent's absolute operation deadline", asyn
   })
 
   resetBridgeStateForTests()
+})
+
+test("session wait refresh interval override is internal-only and bounded", () => {
+  assert.equal(SESSION_WAIT_REFRESH_MS, 240000)
+  assert.equal(resolveSessionWaitRefreshMs({}), SESSION_WAIT_REFRESH_MS)
+  assert.equal(
+    resolveSessionWaitRefreshMs({ [E2E_SESSION_WAIT_REFRESH_ENV_VAR]: "50" }),
+    50,
+  )
+
+  for (
+    const raw
+    of [
+      "",
+      "   ",
+      "nope",
+      "12.5",
+      "0",
+      "-5",
+      "240001",
+      "1000000",
+      "Infinity",
+      "NaN",
+      "50ms",
+    ]
+  ) {
+    assert.equal(
+      resolveSessionWaitRefreshMs({ [E2E_SESSION_WAIT_REFRESH_ENV_VAR]: raw }),
+      SESSION_WAIT_REFRESH_MS,
+      raw,
+    )
+  }
+
+  assert.equal(
+    resolveSessionWaitRefreshMs({ [E2E_SESSION_WAIT_REFRESH_ENV_VAR]: "240000" }),
+    240000,
+  )
 })
 
 test("session wait refresh validates its internal interval", async () => {

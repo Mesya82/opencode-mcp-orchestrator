@@ -401,6 +401,12 @@ probe_mcp() {
   node \
     /e2e/mcp-probe.mjs \
     "$SERVER"
+
+  test \
+    "${1:-}" = "legacy-smoke-only" || \
+    node \
+      /e2e/session-wait-refresh-probe.mjs \
+      "$SERVER"
 }
 
 assert_single_install_layout() {
@@ -617,7 +623,8 @@ assert_claude_present
 assert_state \
   "claude,codex"
 
-probe_mcp
+probe_mcp \
+  legacy-smoke-only
 
 echo LEGACY_V0_1_2_INSTALL_PROVEN
 

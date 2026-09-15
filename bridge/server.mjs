@@ -161,6 +161,47 @@ export function resolvePreserveSessions(env = process.env) {
 export const SESSION_WAIT_REFRESH_MS = 240_000
 
 /*
+ * E2E-only override for the bounded session.wait() refresh interval.
+ * This is strictly internal test machinery for the deterministic
+ * packaged-artifact regression probe; it is not a supported runtime
+ * tuning knob. Absent, empty, zero, negative, non-integer, or
+ * greater-than-production values fall back to SESSION_WAIT_REFRESH_MS.
+ * Only a positive integer <= SESSION_WAIT_REFRESH_MS is accepted.
+ */
+export const E2E_SESSION_WAIT_REFRESH_ENV_VAR =
+  "OPENCODE_MCP_ORCHESTRATOR_E2E_SESSION_WAIT_REFRESH_MS"
+
+export function resolveSessionWaitRefreshMs(env = process.env) {
+  const raw = env?.[E2E_SESSION_WAIT_REFRESH_ENV_VAR]
+
+  if (
+    raw === undefined ||
+    raw === null ||
+    String(raw).trim() === ""
+  ) {
+    return SESSION_WAIT_REFRESH_MS
+  }
+
+  const trimmed = String(raw).trim()
+
+  if (!/^\d+$/.test(trimmed)) {
+    return SESSION_WAIT_REFRESH_MS
+  }
+
+  const parsed = Number(trimmed)
+
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < 1 ||
+    parsed > SESSION_WAIT_REFRESH_MS
+  ) {
+    return SESSION_WAIT_REFRESH_MS
+  }
+
+  return parsed
+}
+
+/*
  * Best-effort bound for the read-only session.get() progress sample taken
  * between bounded session.wait() refreshes. The sample never extends past
  * the absolute operation deadline and never controls the session.
@@ -1385,7 +1426,10 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
         sessionID,
         requestOptions.signal,
         {
-          refreshMs: overrides.sessionWaitRefreshMs,
+          refreshMs: overrides.sessionWaitRefreshMs ??
+            resolveSessionWaitRefreshMs(
+              overrides.env ?? process.env,
+            ),
           operationStartedAt,
           operationDeadlineAt,
         },

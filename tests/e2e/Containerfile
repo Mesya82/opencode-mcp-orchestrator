@@ -16,6 +16,14 @@ RUN useradd \
   --shell /bin/bash \
   tester
 
+COPY \
+  package.json \
+  package-lock.json \
+  /e2e/
+
+RUN npm ci --omit=dev --prefix /e2e \
+  && chown -R tester:tester /e2e
+
 USER tester
 
 ENV HOME=/home/tester
@@ -31,5 +39,9 @@ COPY --chown=tester:tester \
 COPY --chown=tester:tester \
   tests/e2e/mcp-probe.mjs \
   /e2e/mcp-probe.mjs
+
+COPY --chown=tester:tester \
+  tests/e2e/session-wait-refresh-probe.mjs \
+  /e2e/session-wait-refresh-probe.mjs
 
 ENTRYPOINT ["/e2e/run.sh"]
