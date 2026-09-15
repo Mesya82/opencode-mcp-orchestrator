@@ -39,6 +39,7 @@ import {
 
 import {
   commandExists,
+  isExecutableFile,
   isProbeTimeoutResult,
   probeTimeoutMessage,
   SUBPROCESS_PROBE_TIMEOUT_MS,
@@ -159,8 +160,21 @@ if (process.platform === "linux") {
   fail(`Linux required; detected ${process.platform}`)
 }
 
-if (commandExists("bwrap")) {
-  ok("bubblewrap")
+console.log()
+console.log("Launcher prerequisites")
+
+for (const exact of ["/bin/bash", "/usr/bin/python3"]) {
+  if (isExecutableFile(exact)) {
+    ok(`${exact} (exact launcher path)`)
+  } else {
+    fail(`${exact} missing or not executable (exact launcher path required)`)
+  }
+}
+
+if (isExecutableFile("/usr/bin/bwrap")) {
+  ok("/usr/bin/bwrap (exact production path)")
+} else if (commandExists("bwrap")) {
+  fail("/usr/bin/bwrap missing or not executable (exact production path required)")
 } else {
   fail("bubblewrap not found")
 }

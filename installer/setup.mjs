@@ -35,6 +35,7 @@ import {
   assertSafeRecursiveTarget,
   commandExists,
   environmentPaths,
+  isExecutableFile,
 } from "./path-security.mjs"
 
 const here =
@@ -260,11 +261,36 @@ console.log(
 )
 
 const prerequisites = [
-  ["bubblewrap", "bwrap"],
   ["Git", "git"],
 ]
 
 let prerequisiteFailure = false
+
+for (const exact of ["/bin/bash", "/usr/bin/python3"]) {
+  if (isExecutableFile(exact)) {
+    console.log(
+      `  ✓ ${exact} (exact launcher path)`,
+    )
+  } else {
+    console.log(
+      `  ✗ ${exact} missing or not executable (exact launcher path required)`,
+    )
+
+    prerequisiteFailure = true
+  }
+}
+
+if (isExecutableFile("/usr/bin/bwrap")) {
+  console.log(
+    "  ✓ Bubblewrap (/usr/bin/bwrap)",
+  )
+} else {
+  console.log(
+    "  ✗ Bubblewrap (/usr/bin/bwrap missing or not executable)",
+  )
+
+  prerequisiteFailure = true
+}
 
 const openCodeBinary =
   process.env.OPENCODE_BIN ||

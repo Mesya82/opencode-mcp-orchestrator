@@ -24,12 +24,14 @@
 
 import {
   existsSync as fsExistsSync,
+  readFileSync as fsReadFileSync,
   realpathSync as fsRealpathSync,
   statSync as fsStatSync,
 } from "node:fs"
 
 import {
   delimiter as pathDelimiter,
+  dirname,
   isAbsolute,
   relative,
   resolve,
@@ -109,6 +111,263 @@ export function isWithin(root, candidate) {
       !isAbsolute(rel)
     )
   )
+}
+
+export const SANDBOX_LINKED_GIT_MAX_FILE_BYTES = 4096
+
+function isForbiddenGitMetadataRoot(canonical, home) {
+  if (SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT.has(canonical)) {
+    return true
+  }
+
+  if (
+    SANDBOX_RUNTIME_FORBIDDEN_PREFIXES.some(
+      (prefix) => isWithin(prefix, canonical),
+    )
+  ) {
+    return true
+  }
+
+  const segments = canonical.split(sep)
+
+  if (
+    SANDBOX_RUNTIME_HOME_SENSITIVE_PATHS.some(
+      (sensitive) => segments.includes(sensitive),
+    )
+  ) {
+    return true
+  }
+
+  if (!home) return false
+
+  return (
+    canonical === home ||
+    SANDBOX_RUNTIME_HOME_SENSITIVE_PATHS.some(
+      (relativePath) =>
+        isWithin(resolve(home, relativePath), canonical),
+    )
+  )
+}
+
+function hasControlChars(value) {
+  // eslint-disable-next-line no-control-regex
+  return /[\u0000-\u001f\u007f]/.test(value)
+}
+
+function parseGitPointerFile(content, tag) {
+  if (typeof content !== "string") return undefined
+  if (content.length === 0 || content.length > SANDBOX_LINKED_GIT_MAX_FILE_BYTES) {
+    return undefined
+  }
+  if (content.includes("\0")) return undefined
+  // Allow single trailing newline only.
+  let text = content
+  if (text.endsWith("\n")) text = text.slice(0, -1)
+  if (text.includes("\n") || text.includes("\r")) return undefined
+  const trimmed = text.trim()
+  const prefix = `${tag}: `
+  if (!trimmed.startsWith(prefix)) return undefined
+  const target = trimmed.slice(prefix.length).trim()
+  if (target === "" || hasControlChars(target)) return undefined
+  return target
+}
+
+/*
+ * Bounded fail-closed resolver for linked (gitdir-file) worktrees.
+ *
+ * A linked worktree has `<worktree>/.git` as a small file containing
+ * `gitdir: <absolute path>` pointing at the primary's
+ * `<common>/.git/worktrees/<name>` directory, whose `commondir` file
+ * points back at `<common>/.git` and whose `gitdir` file points back at
+ * this worktree's `.git` file. Without mounting both external metadata
+ * directories read-only at their original absolute paths, Git inside the
+ * sandbox cannot resolve HEAD/objects/refs.
+ *
+ * Returns null when there is no linked metadata to mount (missing .git,
+ * normal .git directory, or any malformed/forbidden case fail-closed).
+ * Otherwise returns `{ linkedGitDir, commonDir }` as canonical absolute
+ * paths that the caller may mount read-only.
+ */
+export function resolveLinkedGitMetadata(worktree, options = {}) {
+  const existsFn = options.existsSync ?? fsExistsSync
+  const readFileFn = options.readFileSync ?? fsReadFileSync
+  const realpathFn = options.realpathSync ?? fsRealpathSync
+  const statFn = options.statSync ?? fsStatSync
+  const env = options.env ?? process.env
+
+  try {
+    const gitPath = `${worktree}/.git`
+    const readPointer = (path) => {
+      const info = statFn(path)
+      if (!info.isFile() || !Number.isSafeInteger(info.size) ||
+          info.size < 1 || info.size > SANDBOX_LINKED_GIT_MAX_FILE_BYTES) {
+        throw new Error("invalid Git metadata pointer")
+      }
+      const content = readFileFn(path, "utf8")
+      if (Buffer.byteLength(content, "utf8") > SANDBOX_LINKED_GIT_MAX_FILE_BYTES) {
+        throw new Error("invalid Git metadata pointer")
+      }
+      return content
+    }
+    let gitStat
+    try {
+      gitStat = statFn(gitPath)
+    } catch {
+      return null
+    }
+    if (gitStat.isDirectory()) return null
+    // The .git file must exist as a non-directory; missing file was
+    // already handled via stat failure above.
+    if (!existsFn(gitPath)) return null
+
+    let raw
+    try {
+      raw = readPointer(gitPath)
+    } catch {
+      return null
+    }
+    const rawGitDir = parseGitPointerFile(raw, "gitdir")
+    if (rawGitDir === undefined || !isAbsolute(rawGitDir)) return null
+
+    let canonicalGitFile
+    try {
+      canonicalGitFile = realpathFn(gitPath)
+      if (canonicalGitFile !== resolve(gitPath)) return null
+    } catch {
+      return null
+    }
+    let canonicalGitDir
+    try {
+      canonicalGitDir = realpathFn(rawGitDir)
+    } catch {
+      return null
+    }
+    if (!isAbsolute(canonicalGitDir)) return null
+    try {
+      if (!statFn(canonicalGitDir).isDirectory()) return null
+    } catch {
+      return null
+    }
+
+    // Symlink escapes are handled fail-closed by canonicalization
+    // (realpath) plus the strict worktrees-child, backpointer, and
+    // broad-root checks below.
+
+    let commondirRaw
+    try {
+      commondirRaw = readPointer(resolve(canonicalGitDir, "commondir"))
+    } catch {
+      return null
+    }
+    // commondir is `../..`-style relative content without a tag.
+    let commondirText = undefined
+    if (typeof commondirRaw === "string" && commondirRaw.length <= SANDBOX_LINKED_GIT_MAX_FILE_BYTES && !commondirRaw.includes("\0")) {
+      let t = commondirRaw
+      if (t.endsWith("\n")) t = t.slice(0, -1)
+      if (!t.includes("\n") && !t.includes("\r")) {
+        t = t.trim()
+        if (t !== "" && !hasControlChars(t)) commondirText = t
+      }
+    }
+    if (commondirText === undefined) return null
+    const rawCommon = resolve(canonicalGitDir, commondirText)
+    let canonicalCommon
+    try {
+      canonicalCommon = realpathFn(rawCommon)
+    } catch {
+      return null
+    }
+    try {
+      if (!statFn(canonicalCommon).isDirectory()) return null
+    } catch {
+      return null
+    }
+
+    // Linked gitdir must be exactly one child under <common>/worktrees.
+    const worktreesDir = resolve(canonicalCommon, "worktrees")
+    const rel = relative(worktreesDir, canonicalGitDir)
+    if (rel === "" || rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || rel.includes(sep)) {
+      return null
+    }
+
+    // Common dir must be a real .git metadata directory, never a broad
+    // root, HOME, system, or credential-adjacent directory.
+    if (canonicalCommon.split(sep).pop() !== ".git") return null
+    const homeValue = env?.HOME
+    const canonicalHome = homeValue ? tryRealpath(homeValue, realpathFn) : undefined
+    if (isForbiddenGitMetadataRoot(canonicalCommon, canonicalHome)) return null
+    if (isForbiddenGitMetadataRoot(canonicalGitDir, canonicalHome)) return null
+    // Never mount a host parent of the workspace as metadata (overly
+    // broad). Metadata lexically inside the workspace itself is allowed
+    // but overlaid read-only through both workspace aliases below.
+    if (isWithin(canonicalCommon, worktree) || isWithin(canonicalGitDir, worktree)) return null
+    // Prove the common dir is genuine Git metadata (HEAD or objects present).
+    let isMetadata = false
+    try {
+      if (existsFn(resolve(canonicalCommon, "HEAD"))) isMetadata = true
+    } catch { /* ignore */ }
+    try {
+      if (!isMetadata && existsFn(resolve(canonicalCommon, "objects"))) isMetadata = true
+    } catch { /* ignore */ }
+    if (!isMetadata) return null
+
+    // Backpointer must resolve to this worktree's .git file.
+    let backRaw
+    try {
+      backRaw = readPointer(resolve(canonicalGitDir, "gitdir"))
+    } catch {
+      return null
+    }
+    // Git writes the backpointer as a bare absolute path, not a gitdir tag.
+    let backPath
+    if (typeof backRaw === "string") {
+      let t = backRaw
+      if (t.endsWith("\n")) t = t.slice(0, -1)
+      if (!t.includes("\n") && !t.includes("\r")) {
+        t = t.trim()
+        if (t !== "" && isAbsolute(t) && !hasControlChars(t)) backPath = t
+      }
+    }
+    if (backPath === undefined || !isAbsolute(backPath)) return null
+    let canonicalBack
+    try {
+      canonicalBack = realpathFn(backPath)
+    } catch {
+      return null
+    }
+    if (canonicalBack !== canonicalGitFile) return null
+
+    return { linkedGitDir: canonicalGitDir, commonDir: canonicalCommon }
+  } catch {
+    return null
+  }
+}
+
+function ensureEmptyAncestorDirs(argv, target) {
+  const existing = new Set()
+  for (let index = 0; index + 1 < argv.length; index += 1) {
+    if (argv[index] === "--dir") existing.add(argv[index + 1])
+  }
+  const parent = dirname(target)
+  const parts = parent.split("/").filter(Boolean)
+  let current = ""
+  for (const part of parts) {
+    current += `/${part}`
+    if (current === "/home" || current === "/tmp") continue
+    if (existing.has(current)) continue
+    argv.push("--dir", current)
+    existing.add(current)
+  }
+}
+
+function roBindValidatedGitMetadata(argv, paths) {
+  const seen = new Set()
+  for (const path of paths) {
+    if (!path || seen.has(path)) continue
+    seen.add(path)
+    ensureEmptyAncestorDirs(argv, path)
+    argv.push("--ro-bind", path, path)
+  }
 }
 
 function tryRealpath(path, realpathFn) {
@@ -699,6 +958,33 @@ export function buildBaseSandboxArgv(
       gitMetadata,
       `${worktree}/.git`,
     )
+
+    /*
+     * Linked worktrees store `.git` as a gitdir file pointing outside the
+     * worktree at `<common>/.git/worktrees/<name>`. Mount only the
+     * validated linked gitdir and common Git metadata read-only at their
+     * original absolute paths. Fail closed (no extra mounts) on any
+     * malformed, escaping, overly broad, or mismatched metadata.
+     */
+    const linked = resolveLinkedGitMetadata(worktree, {
+      existsSync: existsFn,
+      readFileSync: options.readFileSync,
+      realpathSync: options.realpathSync,
+      statSync: options.statSync,
+      env: options.env,
+    })
+    if (linked) {
+      roBindValidatedGitMetadata(argv, [linked.linkedGitDir, linked.commonDir])
+      // Any validated metadata path inside the workspace is visible
+      // through both aliases, so overlay it read-only through both paths
+      // as well. Never writable.
+      for (const path of [linked.linkedGitDir, linked.commonDir]) {
+        if (path !== gitMetadata && isWithin(worktree, path) && path !== worktree) {
+          const alias = `/workspace${path.slice(worktree.length)}`
+          argv.push("--ro-bind", path, alias)
+        }
+      }
+    }
   }
 
   for (const path of SANDBOX_ETC_RO_BINDS) {

@@ -65,8 +65,11 @@ Runtime requirements:
 
 - Node.js 20 or newer
 - OpenCode
-- Bubblewrap (`bwrap`)
+- Bubblewrap at the exact production path `/usr/bin/bwrap`
 - Git
+- Exact launcher paths `/bin/bash` and `/usr/bin/python3` (production
+  launches these absolute paths; a `PATH` substitute does not satisfy the
+  check; each must exist, be executable, and not be a directory)
 
 For the corresponding parent integrations:
 
@@ -515,7 +518,11 @@ Installed releases contain:
 
 The doctor checks:
 
-- runtime prerequisites
+- runtime prerequisites, including the exact launcher paths `/bin/bash`,
+  `/usr/bin/python3`, and production Bubblewrap `/usr/bin/bwrap` (each must
+  exist, be executable, and not be a directory; checked even with
+  `--no-sandbox-probes`, so Doctor never reports `DOCTOR_HEALTHY` when a
+  launcher dependency is missing)
 - installed core files
 - configured role models and optional per-role variants
 - the step-limit profile and per-role values

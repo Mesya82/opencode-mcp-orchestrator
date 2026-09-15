@@ -44,6 +44,7 @@ import {
 import {
   SANDBOX_ETC_RO_BINDS,
   buildBaseSandboxArgv,
+  resolveLinkedGitMetadata,
   resolveSandboxRuntimeCapabilities,
   resolveSandboxToolchainDirs,
   runnerOutputBindArgs,
@@ -338,6 +339,31 @@ export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime, opti
   const workspaceGit = `${workspace}/.git`
   allowed.add(workspaceGit)
 
+  /*
+   * Validated linked-worktree metadata (gitdir + common dir) is mounted
+   * read-only at original absolute paths by the shared production
+   * builder. Reuse that builder's fail-closed resolution here (same
+   * injected filesystem hooks) so the invariants accept exactly those
+   * RO mounts and never a writable one.
+   */
+  const existsFn = options.existsSync ?? fsExistsSync
+  let linkedGitSources = new Set()
+  try {
+    const resolved = resolveLinkedGitMetadata(workspace, {
+      existsSync: existsFn,
+      readFileSync: options.readFileSync,
+      realpathSync: options.realpathSync,
+      statSync: options.statSync,
+      env: options.env,
+    })
+    if (resolved) {
+      linkedGitSources = new Set([resolved.linkedGitDir, resolved.commonDir])
+    }
+    for (const path of linkedGitSources) allowed.add(path)
+  } catch {
+    linkedGitSources = new Set()
+  }
+
   const hasAlias = (link, target) => {
     for (let index = 0; index + 2 < argv.length; index += 1) {
       if (argv[index] === "--symlink" && argv[index + 1] === target && argv[index + 2] === link) return true
@@ -354,7 +380,6 @@ export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime, opti
   // real filesystem so optional files (e.g. /etc/gitconfig) missing on the
   // host do not falsely reject, while present files without RO overlays
   // still reject via the seen/expected comparison below.
-  const existsFn = options.existsSync ?? fsExistsSync
   const expectedEtc = new Set(
     SANDBOX_ETC_RO_BINDS.filter((path) => existsFn(path)),
   )
@@ -396,6 +421,13 @@ export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime, opti
       absGitCount += 1
       continue
     }
+    // Validated linked git metadata: RO only, verbatim source==target, or
+    // the in-workspace RO alias (source inside workspace, target under
+    // /workspace). Any --bind of metadata still rejects.
+    if (linkedGitSources.has(source) && flag === "--ro-bind") {
+      if (source === target) continue
+      if (source.startsWith(`${workspace}/`) && target === `/workspace${source.slice(workspace.length)}`) continue
+    }
     if (target === "/runner-output") {
       if (flag !== "--bind" || source !== expectedRunDir) {
         return ["unexpected bind source"]
@@ -431,6 +463,19 @@ export function probeSandboxArgvInvariants(argv, workspace, sandboxRuntime, opti
   }
   if (!gitExists && (aliasGitCount > 0 || absGitCount > 0)) {
     return ["unexpected bind source"]
+  }
+  // Linked worktrees: validated external gitdir + common metadata must be
+  // mounted read-only at original paths; absence breaks Git fail-closed.
+  if (linkedGitSources.size > 0) {
+    const seenLinked = new Set()
+    for (let index = 0; index + 2 < argv.length; index += 1) {
+      if (argv[index] === "--ro-bind" && linkedGitSources.has(argv[index + 1]) && argv[index + 1] === argv[index + 2]) {
+        seenLinked.add(argv[index + 1])
+      }
+    }
+    for (const path of linkedGitSources) {
+      if (!seenLinked.has(path)) return ["missing git protection"]
+    }
   }
 
   for (const path of expectedEtc) {

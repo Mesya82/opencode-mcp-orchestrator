@@ -2,6 +2,7 @@ import {
   accessSync,
   constants,
   lstatSync,
+  statSync,
 } from "node:fs"
 
 import {
@@ -80,6 +81,74 @@ export function findExecutable(name) {
 export function commandExists(name) {
   return (
     findExecutable(name) !== null
+  )
+}
+
+/*
+ * Exact-path launcher prerequisite check without spawning a shell.
+ *
+ * Production launches fixed absolute paths (/bin/bash --noprofile --norc,
+ * /usr/bin/python3, /usr/bin/bwrap). A PATH substitute must not satisfy
+ * this check: only the exact path counts, and it must be an executable
+ * regular file (following executable symlinks). Injectable filesystem overrides keep unit
+ * tests deterministic without touching the real filesystem.
+ */
+export const LAUNCHER_PREREQUISITE_PATHS = Object.freeze([
+  "/bin/bash",
+  "/usr/bin/python3",
+  "/usr/bin/bwrap",
+])
+
+export function isExecutableFile(path, overrides = {}) {
+  if (
+    typeof path !== "string" ||
+    !path.startsWith("/")
+  ) {
+    return false
+  }
+
+  if (path.includes("\0")) {
+    return false
+  }
+
+  const accessFn =
+    overrides.accessSync ?? accessSync
+
+  const statFn =
+    overrides.statSync ?? statSync
+
+  try {
+    accessFn(
+      path,
+      constants.X_OK,
+    )
+  } catch {
+    return false
+  }
+
+  try {
+    const stat =
+      statFn(path)
+
+    if (!stat.isFile()) {
+      return false
+    }
+  } catch {
+    return false
+  }
+
+  return true
+}
+
+export function missingExecutableFiles(paths, overrides = {}) {
+  const list =
+    Array.isArray(paths)
+      ? paths
+      : [paths]
+
+  return list.filter(
+    (path) =>
+      !isExecutableFile(path, overrides),
   )
 }
 

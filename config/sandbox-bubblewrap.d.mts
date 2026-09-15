@@ -82,6 +82,23 @@ export function resolveSandboxRuntimeCapabilities(options?: {
   }
 }): SandboxBubblewrapRuntime
 
+export const SANDBOX_LINKED_GIT_MAX_FILE_BYTES: number
+
+export function resolveLinkedGitMetadata(
+  worktree: string,
+  options?: {
+    readonly existsSync?: (path: string) => boolean
+    readonly readFileSync?: (path: string, encoding: "utf8") => string
+    readonly realpathSync?: (path: string) => string
+    readonly statSync?: (path: string) => {
+      isDirectory(): boolean
+      isFile(): boolean
+      size: number
+    }
+    readonly env?: NodeJS.ProcessEnv
+  },
+): { linkedGitDir: string; commonDir: string } | null
+
 export function buildBaseSandboxArgv(
   worktree: string,
   sandboxCwd: string,
@@ -94,9 +111,12 @@ export function buildBaseSandboxArgv(
     readonly delimiter?: string
     readonly env?: NodeJS.ProcessEnv
     readonly existsSync?: (path: string) => boolean
+    readonly readFileSync?: (path: string, encoding: "utf8") => string
     readonly realpathSync?: (path: string) => string
     readonly statSync?: (path: string) => {
       isDirectory(): boolean
+      isFile(): boolean
+      size: number
     }
   },
 ): string[]
