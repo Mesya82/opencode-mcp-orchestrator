@@ -30,6 +30,11 @@ import {
   type SandboxRuntimeConfig,
 } from "../../../config/sandbox-runtime.mjs"
 
+import {
+  sandboxIsolationArgv,
+  hasNetworklessIsolation,
+} from "../../../config/sandbox-isolation.mjs"
+
 export const RUNNER_ROOT = "/tmp/opencode-runner-runs"
 export const RUNNER_LOG_LIMIT_BYTES =
   128 * 1024 * 1024
@@ -780,6 +785,10 @@ export function loadSandboxRuntimeConfig(options?: {
   }
 }
 
+export function networklessIsolationApplied(argv: unknown) {
+  return hasNetworklessIsolation(argv)
+}
+
 function canonicalHome(
   home: string | undefined,
   realpathFn: (path: string) => string,
@@ -1263,13 +1272,7 @@ export function baseSandboxArgs(
   const argv: string[] = [
     "/usr/bin/bwrap",
 
-    "--die-with-parent",
-    "--new-session",
-
-    "--unshare-net",
-    "--unshare-pid",
-    "--unshare-ipc",
-    "--unshare-uts",
+    ...sandboxIsolationArgv(),
 
     "--ro-bind", "/usr", "/usr",
 
@@ -1369,6 +1372,107 @@ export function baseSandboxArgs(
   argv.push("--chdir", sandboxCwd)
 
   return argv
+}
+
+export type SessionWorktreeContext = {
+  readonly sessionID?: unknown
+}
+
+export type SessionWorktreeGet = (args: {
+  sessionID: string
+}) => Promise<unknown>
+
+function sessionInfoFromResponse(
+  response: unknown,
+): Record<string, unknown> | null {
+  if (!isRecord(response)) return null
+
+  const nested = (response as { data?: unknown })
+    .data
+
+  if (isRecord(nested)) return nested
+
+  return response as Record<string, unknown>
+}
+
+export async function resolveSessionWorktree(
+  context: SessionWorktreeContext | null | undefined,
+  sessionGet: SessionWorktreeGet,
+  fns?: {
+    realpathSync?: (path: string) => string
+    statSync?: (path: string) => {
+      isDirectory(): boolean
+    }
+  },
+): Promise<string> {
+  const sessionID = context?.sessionID
+
+  if (
+    typeof sessionID !== "string" ||
+    sessionID.trim() === ""
+  ) {
+    throw new Error(
+      "sandbox session is unavailable",
+    )
+  }
+
+  let response: unknown
+
+  try {
+    response = await sessionGet({
+      sessionID,
+    })
+  } catch {
+    throw new Error(
+      "sandbox session lookup failed",
+    )
+  }
+
+  const info = sessionInfoFromResponse(response)
+  const location = info?.location
+
+  const directory =
+    isRecord(location) &&
+    typeof location.directory === "string"
+      ? location.directory
+      : undefined
+
+  if (!directory || directory.trim() === "") {
+    throw new Error(
+      "sandbox session has no directory",
+    )
+  }
+
+  const realpathFn = fns?.realpathSync ?? realpathSync
+  const statFn = fns?.statSync ?? statSync
+
+  let canonical: string
+
+  try {
+    canonical = realpathFn(directory)
+  } catch {
+    throw new Error(
+      "sandbox worktree is unavailable",
+    )
+  }
+
+  let stat: { isDirectory(): boolean }
+
+  try {
+    stat = statFn(canonical)
+  } catch {
+    throw new Error(
+      "sandbox worktree is unavailable",
+    )
+  }
+
+  if (!stat.isDirectory()) {
+    throw new Error(
+      "sandbox worktree is not a directory",
+    )
+  }
+
+  return canonical
 }
 
 function readTail(path: string, maxBytes = 7000): string {
@@ -1912,13 +2016,6 @@ export default Plugin.define({
   id: "local.sandbox-tools",
 
   async setup(ctx) {
-    const configuredRoot =
-      ctx.location.project?.canonical ||
-      ctx.location.project?.directory ||
-      ctx.location.directory
-
-    const worktree = realpathSync(configuredRoot)
-
     const setupLimits = resolveSandboxLimits()
 
     pruneRunnerRuns({
@@ -1981,10 +2078,21 @@ export default Plugin.define({
           codemode: false,
         },
 
-        execute: async (input) => {
+        execute: async (input, context) => {
           const { command } = input as {
             command: string
           }
+
+          const worktree =
+            await resolveSessionWorktree(
+              context as
+                | SessionWorktreeContext
+                | undefined,
+              (args) =>
+                ctx.session.get(
+                  args as never,
+                ) as Promise<unknown>,
+            )
 
           const shellLimits =
             resolveSandboxLimits()
@@ -2061,7 +2169,18 @@ export default Plugin.define({
           codemode: false,
         },
 
-        execute: async (input) => {
+        execute: async (input, context) => {
+          const worktree =
+            await resolveSessionWorktree(
+              context as
+                | SessionWorktreeContext
+                | undefined,
+              (args) =>
+                ctx.session.get(
+                  args as never,
+                ) as Promise<unknown>,
+            )
+
           return executeSandboxRun(
             worktree,
             input as SandboxRunInput,
@@ -2084,7 +2203,18 @@ export default Plugin.define({
           codemode: false,
         },
 
-        execute: async (input) => {
+        execute: async (input, context) => {
+          const worktree =
+            await resolveSessionWorktree(
+              context as
+                | SessionWorktreeContext
+                | undefined,
+              (args) =>
+                ctx.session.get(
+                  args as never,
+                ) as Promise<unknown>,
+            )
+
           return executeSandboxRun(
             worktree,
             input as SandboxRunInput,

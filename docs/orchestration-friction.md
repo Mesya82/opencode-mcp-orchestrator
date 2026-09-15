@@ -204,6 +204,185 @@ follow-up inspection with `sandbox_log`:
 4. Report the concrete timeout, what was checked, and any continued-session
    edits found.
 
+## Delegated-agent incidents observed 2026-09-15
+
+Current status on 2026-09-15: incident 1 is diagnosed but its activation
+lifecycle is not fixed. Incidents 2 and 3 are fixed in source and covered by
+focused and full local tests; installed two-worktree validation remains
+pending. Doctor probes pass focused/full local tests and real Bubblewrap
+execution. The broad container E2E was stopped after an external OpenCode
+download stalled; it did not reach the installed Doctor checks.
+Incidents 2 and 3 shared the same plugin-init worktree-capture defect but have
+distinct effects and regression assertions.
+
+### 1. Stale OpenCode service bypassed the Muse final-step hook
+
+Confirmed fact: worker session `ses_f5ebd0ffdffeyzhQFrnTVyZh12` failed on
+2026-09-14T19:08:29Z with Console `invalid_request_error`: only `"auto"` is
+supported for `tool_choice`. It left partial edits; a materially narrower
+retry later succeeded.
+
+Confirmed fact: the repository hook `omitUnsupportedMuseFinalToolChoice` in
+`opencode/plugins/sandbox-tools/index.ts` strips literal `tool_choice:"none"`
+only for primary `opencode-orchestrator-*` sessions using providerID
+`opencode` and model id prefix `muse-spark-`, with tools absent or `[]`. The
+current installed plugin contains the hook, and the current worker model is
+`opencode/muse-spark-1.3-contributor-free` (variant low, Extended 48 steps).
+
+Confirmed fact: the installed plugin hash equals the current installed bundle
+hash and contains the hook. The OpenCode service run `e57c2ef2` started
+2026-09-11T13:36:22Z; the compatibility hook was installed/reinstalled later
+(installed plugin mtime 2026-09-14T16:49:05Z). The incident occurred under the
+same long-lived run `e57c2ef2`. `opencode.log` contains zero
+`opencode_orchestrator_muse_final_tool_choice_omitted` events.
+
+Diagnosis: confirmed operational stale-process/load issue — the long-lived
+OpenCode service did not reload the installed compatibility hook. This is not
+current source drift or a model-predicate mismatch. No open design question
+on cause.
+
+Why a successful update did not prevent it: `install-opencode.mjs` atomically
+replaces managed plugin files, and `setup.mjs` subsequently runs Doctor, but
+neither component reloads or restarts the already-running OpenCode background
+service. Doctor checks that the plugin exists on disk; it does not prove that
+the running service loaded that generation. The installed OpenCode CLI exposes
+`opencode2 service restart`, but the orchestrator update path never invokes it
+or emits a mandatory restart result. The update therefore succeeded on disk
+while the September 11 service continued running its older in-memory plugin.
+
+Impact: a delegated agent that exhausted its model steps could complete edits
+but fail before returning its final report.
+
+Immediate recovery: restart/reload the OpenCode service after install/update
+so the installed hook is loaded; then retry with a narrowed task if needed.
+
+Required correction: installer/setup must explicitly require activation after
+updating the OpenCode plugin. Because an automatic restart can interrupt active
+sessions and leave writable work quarantined, the safe default is an explicit
+`OPENCODE_RESTART_REQUIRED` result with the supported
+`opencode2 service restart` command; interactive setup may offer that restart
+only after confirmation. Doctor must detect/report stale loaded state rather
+than treating file presence as runtime readiness. Keep the current hook until
+upstream issue #48741 is fixed and a disabled-hook live regression passes.
+
+Regression coverage: test install/update followed by service reload and a
+live exhaustion/final-synthesis probe; assert the omit event and successful
+final text. Never log request bodies or auth.
+
+Removal/recheck criteria: same as the tracked upstream issue — upstream
+confirms a fix, the installed OpenCode version contains it, and the live
+multi-tool Worker regression passes with the hook disabled.
+
+### 2. Worker verification mounted the wrong worktree — source fixed
+
+Confirmed fact: the requested cwd was
+`/home/Messier82/opencode-mcp-orchestrator-diagnostics/model-variants-worktree`.
+Structured Worker edits landed there. `sandbox_shell` saw `/workspace` from
+the OpenCode server's startup project/main copy and could not see the edited
+files.
+
+Diagnosis (from scout): `bridge/server.mjs` correctly passes
+`session.create({location:{directory}})`, so native structured editing follows
+the session location. `opencode/plugins/sandbox-tools/index.ts` `setup(ctx)`
+computes `configuredRoot` from `ctx.location` and captures
+`const worktree=realpathSync(configuredRoot)` once per plugin-process
+initialization. `sandbox_shell` later calls
+`baseSandboxArgs(capturedWorktree,"/workspace")`, so it ignores the delegated
+session directory.
+
+Impact: a Worker may falsely report tests were run against its changes, or
+truthfully report files missing; writable commands can target the wrong
+checkout.
+
+Resolved implementation path (verified repository/dependency API, not yet
+landed): `@opencode/plugin` and `@opencode/client` are
+`0.0.0-beta-19425`. The tool execute signature is
+`execute(input, context)`, where `context.sessionID` is defined by
+`node_modules/@opencode/schema/dist/tool.d.ts` and the
+`@opencode/plugin` `ToolContext`. Setup `ctx` exposes
+`ctx.session.get({ sessionID })`, and `SessionInfo.location.directory`
+is the per-session directory. `ToolEditor` has no dynamic
+workspace/root callback, and the current
+`sandbox_shell`/`sandbox_run`/`sandbox_run_ro` execute callbacks ignore
+their second argument. The resolved per-call path is therefore:
+require non-empty `context.sessionID` in `execute(input, context)`;
+`await ctx.session.get({ sessionID })`; require
+`location.directory`; canonicalize it and require a directory; then
+pass that canonical root to `baseSandboxArgs`. Never fall back to the
+setup-time root.
+
+Implementation status: the plugin now resolves the canonical worktree per
+executing session/tool call via the path above instead of capturing the
+startup worktree. The resulting root is passed to `baseSandboxArgs`, and the
+reported `sandbox_root` reflects that root. It fails closed: missing
+session identity/location, session lookup failure, or an
+invalid/non-directory path must abort before `bwrap`/Git and emit a
+bounded message without exposing absolute host paths. Do not cache the
+directory because `session.move` can change the session location.
+
+Immediate recovery: verify edits and run checks in the requested checkout via
+host-side commands until the plugin fix lands; do not trust `sandbox_shell`
+file visibility as proof of the requested worktree state.
+
+Regression coverage: unit tests resolve distinct A/B sessions, accept bare and
+wrapped session responses, fail closed without path leakage, re-resolve a
+moved session without caching, and invoke the registered `sandbox_shell` tool
+twice to assert that each call mounts its own session worktree. The full local
+build, unit/integration suite, and TypeScript check pass. An installed
+two-worktree live regression must still confirm
+`ctx.session.get` sees the calling session's updated location and
+determine whether `SessionInfo.subpath` affects sandbox cwd; this is a
+narrow remaining check and does not make the root cause uncertain.
+
+Removal/recheck criteria: remove this note only after the per-session fix
+lands and the two-worktree `sandbox_shell` sentinel regression passes.
+
+### 3. Runner verification and Git status used the wrong worktree — source fixed
+
+Confirmed fact: a Runner given the same alternate cwd ran
+`node --test tests/unit/sandbox-probes.test.mjs` and failed
+`Could not find...` though the file existed there. The Runner reported
+repository status unchanged.
+
+Diagnosis: the same captured startup worktree feeds `executeSandboxRun`,
+`resolveSandboxCwd`, `buildSandboxRunArgv`, and both `gitStatus` calls.
+Therefore `/workspace`, the command cwd, before/after status, and the status
+delta all refer to the stale checkout.
+
+Impact: tests execute against the wrong source and
+`worktree_status_changed`/delta can be false.
+
+Resolved implementation path: the same per-call resolver as incident 2
+feeds `executeSandboxRun`, so `resolveSandboxCwd`,
+`buildSandboxRunArgv`, and both `gitStatus` calls all use the
+per-session root derived from `context.sessionID` via
+`ctx.session.get({ sessionID })` and canonicalized
+`location.directory`.
+
+Implementation status: the per-session canonical worktree is now threaded into
+`sandbox_run`/`sandbox_run_ro` and Git status collection via that resolver.
+Missing session identity/location, session
+lookup failure, or an invalid/non-directory path must abort before
+`bwrap`/Git and emit a bounded message without exposing absolute host
+paths. Do not cache the directory because `session.move` can change the
+session location.
+
+Immediate recovery: run the requested tests and `git status`/diff in the
+requested checkout via host-side commands until the plugin fix lands; do not
+trust Runner cwd or status-delta output for worktree selection.
+
+Regression coverage: the registered read-only and writable Runner tools are
+invoked with different session IDs. Tests assert read-only versus writable
+mounts for the correct session root and assert that a change made only in the
+second worktree appears in that Runner's Git status delta. The full local
+build, unit/integration suite, and TypeScript check pass. An installed
+two-worktree live test must still confirm the updated session location and
+`SessionInfo.subpath` behavior; this is narrow remaining validation and does
+not make the source diagnosis or fix uncertain.
+
+Removal/recheck criteria: remove this note only after the per-session fix
+lands and the two-worktree sandbox-run/Git-status regression passes.
+
 ## Upstream audit finding with no available fix
 
 As of 2026-09-12, `npm audit` reports 11 moderate, 0 high, and

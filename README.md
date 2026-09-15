@@ -525,6 +525,14 @@ The doctor checks:
 - OpenCode agents/plugin
 - selected Codex integration
 - selected Claude Code integration
+- separate networkless Worker and Runner sandbox execution probes
+
+Sandbox probes use fixed commands in disposable workspaces, with validated
+trusted runtime roots. The Worker workspace must be writable; the Runner
+workspace must be read-only while sandbox-private temporary storage is writable.
+Probe failures make Doctor unhealthy. To inspect only the other installation
+checks, pass `--no-sandbox-probes`; Doctor explicitly reports sandbox readiness
+as unverified when probes are skipped.
 
 A healthy installation ends with:
 

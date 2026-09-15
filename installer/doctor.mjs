@@ -28,6 +28,11 @@ import {
 } from "../config/sandbox-runtime.mjs"
 
 import {
+  SANDBOX_PROBE_KINDS,
+  runSandboxProbe,
+} from "../config/sandbox-probes.mjs"
+
+import {
   codexConfigPath,
   readCodexMcpToolTimeout,
 } from "./codex-config.mjs"
@@ -42,6 +47,7 @@ import {
 function parseArgs(argv) {
   const result = {
     config: null,
+    sandboxProbes: true,
   }
 
   for (let i = 0; i < argv.length; i++) {
@@ -52,10 +58,15 @@ function parseArgs(argv) {
       continue
     }
 
+    if (arg === "--no-sandbox-probes") {
+      result.sandboxProbes = false
+      continue
+    }
+
     if (arg === "--help" || arg === "-h") {
       console.log(`
 Usage:
-  doctor.mjs [--config PATH]
+  doctor.mjs [--config PATH] [--no-sandbox-probes]
 `)
       process.exit(0)
     }
@@ -464,6 +475,25 @@ for (
       } else {
         fail("Claude Code MCP registration missing")
       }
+    }
+  }
+}
+
+console.log()
+console.log("Sandbox probes")
+
+if (!args.sandboxProbes) {
+  console.log("  - sandbox probes skipped; readiness unverified")
+} else {
+  const probeRuntime = sandboxRuntime ?? { trustedRoots: [] }
+
+  for (const kind of SANDBOX_PROBE_KINDS) {
+    const result = runSandboxProbe(kind, { sandboxRuntime: probeRuntime })
+
+    if (result.ok) {
+      ok(`${kind} sandbox probe`)
+    } else {
+      fail(`${kind} sandbox probe: ${result.detail || `${kind} probe failed`}`)
     }
   }
 }

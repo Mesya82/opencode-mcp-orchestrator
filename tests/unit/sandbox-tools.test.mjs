@@ -1,12 +1,14 @@
 import assert from "node:assert/strict"
+import { spawnSync } from "node:child_process"
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync, symlinkSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import test from "node:test"
 
-import {
+import sandboxPlugin, {
   GIT_STATUS_TIMEOUT_MS,
+  RUNNER_ROOT,
   RUNNER_LOG_LIMIT_BYTES,
   SANDBOX_LOG_TIMEOUT_MS,
   SANDBOX_RUNNER_LOG_LIMIT_BYTES_DEFAULT,
@@ -48,6 +50,7 @@ import {
   loadSandboxRuntimeConfig,
   resolveSandboxRuntimeCapabilities,
   resolveSandboxCwd,
+  resolveSessionWorktree,
   resolveRunnerLogLimitBytes,
   resolveRunnerRetentionCount,
   resolveRunnerRetentionHours,
@@ -1448,4 +1451,201 @@ test("pruneRunnerRuns enforces age and count", () => {
   assert.equal(existsSync(join(root, "run-c")), true)
   assert.equal(existsSync(join(root, "run-b")), true)
   assert.equal(existsSync(join(root, "run-a")), false)
+})
+
+test("resolveSessionWorktree returns distinct canonical roots per session", async (t) => {
+  const dirA = mkdtempSync(join(tmpdir(), "sandbox-ses-a-"))
+  const dirB = mkdtempSync(join(tmpdir(), "sandbox-ses-b-"))
+  t.after(() => {
+    rmSync(dirA, { recursive: true, force: true })
+    rmSync(dirB, { recursive: true, force: true })
+  })
+  const seen = []
+  const get = async ({ sessionID }) => {
+    seen.push(sessionID)
+    return { location: { directory: sessionID === "ses-a" ? dirA : dirB } }
+  }
+
+  assert.equal(await resolveSessionWorktree({ sessionID: "ses-a" }, get), dirA)
+  assert.equal(await resolveSessionWorktree({ sessionID: "ses-b" }, get), dirB)
+  assert.deepEqual(seen, ["ses-a", "ses-b"])
+})
+
+test("resolveSessionWorktree accepts bare and data-wrapped session responses", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-ses-"))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  assert.equal(
+    await resolveSessionWorktree({ sessionID: "s1" }, async () => ({ location: { directory: dir } })),
+    dir,
+  )
+  assert.equal(
+    await resolveSessionWorktree({ sessionID: "s1" }, async () => ({ data: { location: { directory: dir } } })),
+    dir,
+  )
+})
+
+test("resolveSessionWorktree fails closed without leaking absolute paths", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "sandbox-ses-"))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const missing = join(tmpdir(), "sandbox-ses-missing-xyz")
+  const file = join(dir, "plain")
+  writeFileSync(file, "x\n")
+
+  const cases = [
+    { context: {}, get: async () => ({ location: { directory: dir } }), match: /unavailable|lookup|directory|worktree/ },
+    { context: { sessionID: "" }, get: async () => ({ location: { directory: dir } }), match: /unavailable/ },
+    { context: { sessionID: "s" }, get: async () => { throw new Error("boom") }, match: /lookup failed/ },
+    { context: { sessionID: "s" }, get: async () => ({}), match: /no directory/ },
+    { context: { sessionID: "s" }, get: async () => ({ location: {} }), match: /no directory/ },
+    { context: { sessionID: "s" }, get: async () => ({ location: { directory: missing } }), match: /unavailable/ },
+    { context: { sessionID: "s" }, get: async () => ({ location: { directory: file } }), match: /not a directory/ },
+  ]
+
+  for (const { context, get, match } of cases) {
+    await assert.rejects(() => resolveSessionWorktree(context, get), match)
+    try {
+      await resolveSessionWorktree(context, get)
+      assert.fail("expected to throw")
+    } catch (error) {
+      assert.doesNotMatch(error.message, /ENOENT/)
+      assert.doesNotMatch(error.message, /boom/)
+      for (const secret of [missing, file]) {
+        assert.ok(!error.message.includes(secret), `leaked ${secret}`)
+      }
+    }
+  }
+})
+
+test("resolveSessionWorktree does not cache session moves", async (t) => {
+  const dirA = mkdtempSync(join(tmpdir(), "sandbox-ses-move-a-"))
+  const dirB = mkdtempSync(join(tmpdir(), "sandbox-ses-move-b-"))
+  t.after(() => {
+    rmSync(dirA, { recursive: true, force: true })
+    rmSync(dirB, { recursive: true, force: true })
+  })
+  let current = dirA
+  const get = async () => ({ location: { directory: current } })
+
+  assert.equal(await resolveSessionWorktree({ sessionID: "s" }, get), dirA)
+  current = dirB
+  assert.equal(await resolveSessionWorktree({ sessionID: "s" }, get), dirB)
+})
+
+test("filesystem tool sources resolve per-session worktree from context", () => {
+  const source = readFileSync(pluginPath, "utf8")
+  for (const name of ["sandbox_shell", "sandbox_run", "sandbox_run_ro"]) {
+    assert.ok(source.includes(`name: "${name}"`), name)
+  }
+  assert.ok(source.includes("resolveSessionWorktree"))
+  assert.ok(source.includes("context.sessionID") || source.includes("sessionID"))
+  assert.ok(source.includes("execute: async (input, context)"))
+  assert.ok(!source.includes("const worktree = realpathSync(configuredRoot)"))
+})
+
+test("sandbox_shell resolves and mounts each executing session worktree", async (t) => {
+  const dirA = mkdtempSync(join(tmpdir(), "sandbox-execute-a-"))
+  const dirB = mkdtempSync(join(tmpdir(), "sandbox-execute-b-"))
+  const registered = new Map()
+  const spawned = []
+  const previousBun = globalThis.Bun
+
+  for (const directory of [dirA, dirB]) {
+    const initialized = spawnSync("git", ["init", "--quiet"], {
+      cwd: directory,
+      encoding: "utf8",
+    })
+    assert.equal(initialized.status, 0, initialized.stderr)
+  }
+
+  t.after(() => {
+    rmSync(dirA, { recursive: true, force: true })
+    rmSync(dirB, { recursive: true, force: true })
+    globalThis.Bun = previousBun
+  })
+
+  globalThis.Bun = {
+    spawn(argv) {
+      spawned.push(argv)
+      if (argv.includes("/runner-output") && argv.includes(dirB)) {
+        writeFileSync(join(dirB, "runner-change.txt"), "changed\n")
+      }
+      return {
+        stdout: new Uint8Array(),
+        stderr: new Uint8Array(),
+        exited: Promise.resolve(0),
+        kill() {},
+      }
+    },
+  }
+
+  await sandboxPlugin.setup({
+    session: {
+      async hook() {},
+      async get({ sessionID }) {
+        return {
+          location: {
+            directory: sessionID === "ses-a" ? dirA : dirB,
+          },
+        }
+      },
+    },
+    tool: {
+      async transform(callback) {
+        callback({
+          add(info) {
+            registered.set(info.name, info)
+          },
+        })
+      },
+    },
+  })
+
+  const shell = registered.get("sandbox_shell")
+  assert.ok(shell)
+
+  const resultA = await shell.execute(
+    { command: "true" },
+    { sessionID: "ses-a" },
+  )
+  const resultB = await shell.execute(
+    { command: "true" },
+    { sessionID: "ses-b" },
+  )
+
+  assert.equal(mountFlag(spawned[0], dirA, "/workspace"), "--bind")
+  assert.equal(mountFlag(spawned[1], dirB, "/workspace"), "--bind")
+  assert.ok(!spawned[0].includes(dirB))
+  assert.ok(!spawned[1].includes(dirA))
+  assert.match(resultA.content, new RegExp(`sandbox_root=${dirA}`))
+  assert.match(resultB.content, new RegExp(`sandbox_root=${dirB}`))
+
+  const runnerReadOnly = registered.get("sandbox_run_ro")
+  const runnerWritable = registered.get("sandbox_run")
+  assert.ok(runnerReadOnly)
+  assert.ok(runnerWritable)
+
+  const runnerA = await runnerReadOnly.execute(
+    { command: "true" },
+    { sessionID: "ses-a" },
+  )
+  const runnerB = await runnerWritable.execute(
+    { command: "true" },
+    { sessionID: "ses-b" },
+  )
+
+  assert.equal(mountFlag(spawned[2], dirA, "/workspace"), "--ro-bind")
+  assert.equal(mountFlag(spawned[3], dirB, "/workspace"), "--bind")
+  assert.match(runnerA.content, /worktree_status_changed=false/)
+  assert.match(runnerB.content, /worktree_status_changed=true/)
+  assert.match(runnerB.content, /runner-change\.txt/)
+
+  for (const result of [runnerA, runnerB]) {
+    const runID = result.content.match(/^run_id=(.+)$/m)?.[1]
+    if (runID) {
+      rmSync(join(RUNNER_ROOT, runID), {
+        recursive: true,
+        force: true,
+      })
+    }
+  }
 })
