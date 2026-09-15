@@ -60,6 +60,31 @@ test("structured model discovery retries and succeeds after a transient failure"
   )
 })
 
+test("structured model discovery falls back when stable V2 returns an empty catalog", () => {
+  const delays = []
+  let calls = 0
+
+  const discovered =
+    discoverStructuredModelCatalog({
+      run: () => {
+        calls++
+        return response({ stdout: '{"data":[]}' })
+      },
+      parse: () => null,
+      isTimeout: () => false,
+      sleep: (milliseconds) => delays.push(milliseconds),
+    })
+
+  assert.equal(calls, STRUCTURED_CATALOG_ATTEMPTS)
+  assert.deepEqual(delays, [500, 1000])
+  assert.equal(discovered.entries, null)
+  assert.equal(discovered.attempts, STRUCTURED_CATALOG_ATTEMPTS)
+  assert.match(
+    discovered.fallbackReason,
+    /structured OpenCode \/api\/model discovery failed after 3 attempts: returned unusable structured model metadata/,
+  )
+})
+
 test("structured model discovery explains fallback after retries are exhausted", () => {
   const delays = []
   let calls = 0
