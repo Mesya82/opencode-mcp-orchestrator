@@ -22,6 +22,20 @@ import { syncBuiltinESMExports } from "node:module"
 const failPath = process.env.LAUNCHER_PREREQ_FAIL_PATH
 const kind = process.env.LAUNCHER_PREREQ_FAIL_KIND || "missing"
 
+// Hermetic baseline: every exact launcher prerequisite is treated as a
+// valid executable file regardless of the host (absent/old /usr/bin/bwrap
+// must not leak in). Only the selected failPath stays invalid.
+const BASELINE_PATHS = new Set([
+  "/usr/bin/bash",
+  "/usr/bin/python3",
+  "/usr/bin/bwrap",
+  "/usr/bin/git",
+])
+
+function isBaseline(path) {
+  return typeof path === "string" && BASELINE_PATHS.has(path)
+}
+
 function match(path) {
   return typeof path === "string" && path === failPath
 }
@@ -39,13 +53,20 @@ function failAccess(path, args) {
   throw error
 }
 
-if (failPath) {
+// Always installed: baseline hermetic mock plus the selected failure.
+{
   const origAccessSync = fs.accessSync.bind(fs)
   const origStatSync = fs.statSync.bind(fs)
 
   function patchedAccessSync(path, ...rest) {
     if (match(path) && kind !== "directory") {
       failAccess(path, rest)
+    }
+
+    // Baseline: exact prerequisites always pass the executable-access
+    // check unless they are the selected failure.
+    if (isBaseline(path)) {
+      return undefined
     }
 
     return origAccessSync(path, ...rest)
@@ -68,6 +89,16 @@ if (failPath) {
       }
 
       // nonexec: regular file metadata; the access check above fails.
+      return {
+        isFile: () => true,
+        isDirectory: () => false,
+        size: 1024,
+      }
+    }
+
+    // Baseline: exact prerequisites always look like regular files unless
+    // they are the selected failure.
+    if (isBaseline(path)) {
       return {
         isFile: () => true,
         isDirectory: () => false,
