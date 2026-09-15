@@ -63,6 +63,7 @@ test("structured model discovery retries and succeeds after a transient failure"
 test("structured model discovery falls back when stable V2 returns an empty catalog", () => {
   const delays = []
   let calls = 0
+  let parseCalls = 0
 
   const discovered =
     discoverStructuredModelCatalog({
@@ -70,12 +71,16 @@ test("structured model discovery falls back when stable V2 returns an empty cata
         calls++
         return response({ stdout: '{"data":[]}' })
       },
-      parse: () => null,
+      parse: () => {
+        parseCalls++
+        throw new Error("empty stable V2 catalog must be handled before parsing")
+      },
       isTimeout: () => false,
       sleep: (milliseconds) => delays.push(milliseconds),
     })
 
   assert.equal(calls, STRUCTURED_CATALOG_ATTEMPTS)
+  assert.equal(parseCalls, 0)
   assert.deepEqual(delays, [500, 1000])
   assert.equal(discovered.entries, null)
   assert.equal(discovered.attempts, STRUCTURED_CATALOG_ATTEMPTS)
