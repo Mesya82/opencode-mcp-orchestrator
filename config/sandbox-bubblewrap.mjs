@@ -24,6 +24,7 @@
 
 import {
   existsSync as fsExistsSync,
+  lstatSync as fsLstatSync,
   readFileSync as fsReadFileSync,
   realpathSync as fsRealpathSync,
   statSync as fsStatSync,
@@ -193,10 +194,23 @@ export function resolveLinkedGitMetadata(worktree, options = {}) {
   const readFileFn = options.readFileSync ?? fsReadFileSync
   const realpathFn = options.realpathSync ?? fsRealpathSync
   const statFn = options.statSync ?? fsStatSync
+  const lstatFn = options.lstatSync ?? fsLstatSync
   const env = options.env ?? process.env
 
   try {
     const gitPath = `${worktree}/.git`
+    // Lexical validation first: accept only a real regular file at .git.
+    // Symlink/FIFO/device/other must fail closed here, not via raw binds.
+    try {
+      const lexical = lstatFn(gitPath)
+      if (lexical.isDirectory()) return null
+      if (!lexical.isFile()) return null
+    } catch {
+      // Missing .git remains supported (no linked metadata).
+      // Distinguish missing from other lstat failures via stat probe:
+      // any failure here means no resolvable linked metadata.
+      return null
+    }
     const readPointer = (path) => {
       const info = statFn(path)
       if (!info.isFile() || !Number.isSafeInteger(info.size) ||
@@ -227,7 +241,14 @@ export function resolveLinkedGitMetadata(worktree, options = {}) {
       return null
     }
     const rawGitDir = parseGitPointerFile(raw, "gitdir")
-    if (rawGitDir === undefined || !isAbsolute(rawGitDir)) return null
+    if (rawGitDir === undefined) return null
+    // Absolute pointers are historic; relative pointers (git worktree
+    // add --relative-paths) resolve relative to the containing .git
+    // directory, i.e. dirname(<worktree>/.git).
+    const absGitDir = isAbsolute(rawGitDir)
+      ? rawGitDir
+      : resolve(dirname(gitPath), rawGitDir)
+    if (absGitDir === "" || hasControlChars(absGitDir)) return null
 
     let canonicalGitFile
     try {
@@ -238,7 +259,7 @@ export function resolveLinkedGitMetadata(worktree, options = {}) {
     }
     let canonicalGitDir
     try {
-      canonicalGitDir = realpathFn(rawGitDir)
+      canonicalGitDir = realpathFn(absGitDir)
     } catch {
       return null
     }
@@ -319,13 +340,21 @@ export function resolveLinkedGitMetadata(worktree, options = {}) {
       return null
     }
     // Git writes the backpointer as a bare absolute path, not a gitdir tag.
+    // Newer Git may write it relative; resolve relative to the private
+    // gitdir directory (dirname(<gitdir>/gitdir)).
     let backPath
     if (typeof backRaw === "string") {
       let t = backRaw
       if (t.endsWith("\n")) t = t.slice(0, -1)
       if (!t.includes("\n") && !t.includes("\r")) {
         t = t.trim()
-        if (t !== "" && isAbsolute(t) && !hasControlChars(t)) backPath = t
+        if (t !== "") {
+          if (isAbsolute(t)) {
+            if (!hasControlChars(t)) backPath = t
+          } else if (!hasControlChars(t)) {
+            backPath = resolve(dirname(resolve(canonicalGitDir, "gitdir")), t)
+          }
+        }
       }
     }
     if (backPath === undefined || !isAbsolute(backPath)) return null
@@ -881,6 +910,9 @@ export function buildBaseSandboxArgv(
   options = {},
 ) {
   const existsFn = options.existsSync ?? fsExistsSync
+  const lstatFn = options.lstatSync ?? fsLstatSync
+  const realpathFn = options.realpathSync ?? fsRealpathSync
+  const statFn = options.statSync ?? fsStatSync
   const readonlyWorkspace = options.readonlyWorkspace === true
   const toolchainDirs = options.toolchainDirs ?? []
   const runtime = options.runtime ?? {
@@ -944,7 +976,75 @@ export function buildBaseSandboxArgv(
 
   const gitMetadata = `${worktree}/.git`
 
-  if (existsFn(gitMetadata)) {
+  /*
+   * Validate lexical .git BEFORE any bind: accept only a real directory
+   * (normal repo) or a real regular gitfile whose linked metadata
+   * validates. Symlink/FIFO/device/other or malformed gitfile must fail
+   * closed at builder level (explicit bounded error, not raw bind).
+   * Missing .git remains supported for ordinary non-Git workspaces.
+   */
+  let gitKind = "missing"
+  try {
+    const lexical = lstatFn(gitMetadata)
+    if (lexical.isDirectory()) {
+      gitKind = "dir"
+    } else if (lexical.isFile()) {
+      gitKind = "file"
+    } else {
+      throw new Error(
+        "invalid Git metadata: .git is not a directory or regular file",
+      )
+    }
+  } catch (error) {
+    if (error?.message?.startsWith("invalid Git metadata")) throw error
+    if (error?.code === "ENOENT") {
+      gitKind = "missing"
+    } else {
+      throw new Error("invalid Git metadata: cannot stat .git")
+    }
+  }
+
+  if (gitKind === "dir") {
+    let canonicalGitDir
+    try {
+      canonicalGitDir = realpathFn(gitMetadata)
+    } catch (error) {
+      if (error?.message?.startsWith("invalid Git metadata")) throw error
+      throw new Error("invalid Git metadata: cannot stat .git")
+    }
+    // Canonical directory must equal the lexical path; a mismatch means
+    // the .git directory is a symlink escape and must fail closed here.
+    if (canonicalGitDir !== resolve(gitMetadata)) {
+      throw new Error("invalid Git metadata: .git directory mismatch")
+    }
+    try {
+      if (!statFn(canonicalGitDir).isDirectory()) {
+        throw new Error("invalid Git metadata: .git is not a directory")
+      }
+    } catch (error) {
+      if (error?.message?.startsWith("invalid Git metadata")) throw error
+      throw new Error("invalid Git metadata: cannot stat .git")
+    }
+  }
+
+  let linked = null
+  if (gitKind === "file") {
+    // A regular .git file must be a valid linked-worktree pointer.
+    // Anything else fails closed: no raw bind of attacker-shaped content.
+    linked = resolveLinkedGitMetadata(worktree, {
+      existsSync: existsFn,
+      readFileSync: options.readFileSync,
+      realpathSync: options.realpathSync,
+      statSync: options.statSync,
+      lstatSync: options.lstatSync,
+      env: options.env,
+    })
+    if (!linked) {
+      throw new Error("invalid Git metadata: malformed .git file")
+    }
+  }
+
+  if (gitKind !== "missing") {
     /*
      * The worktree is visible through two paths, therefore Git metadata
      * must be overlaid read-only through both paths as well.
@@ -966,13 +1066,6 @@ export function buildBaseSandboxArgv(
      * original absolute paths. Fail closed (no extra mounts) on any
      * malformed, escaping, overly broad, or mismatched metadata.
      */
-    const linked = resolveLinkedGitMetadata(worktree, {
-      existsSync: existsFn,
-      readFileSync: options.readFileSync,
-      realpathSync: options.realpathSync,
-      statSync: options.statSync,
-      env: options.env,
-    })
     if (linked) {
       roBindValidatedGitMetadata(argv, [linked.linkedGitDir, linked.commonDir])
       // Any validated metadata path inside the workspace is visible

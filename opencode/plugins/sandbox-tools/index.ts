@@ -966,28 +966,122 @@ export function pruneRunnerRuns(overrides?: {
   })
 }
 
-function gitStatus(worktree: string): string {
-  if (!existsSync(join(worktree, ".git"))) return ""
-
-  const result = spawnSync(
-    "/usr/bin/git",
-    [
-      "-C",
-      worktree,
-      "status",
-      "--porcelain=v1",
-      "--untracked-files=normal",
-    ],
-    gitStatusSpawnOptions(),
-  )
-
+export function resolveGitStatusOutput(result: {
+  error?: unknown
+  status?: number | null
+  signal?: unknown
+  stdout?: unknown
+}): string {
   if (isSpawnTimeout(result)) {
     throw new Error(
       `git status timed out after ${GIT_STATUS_TIMEOUT_MS}ms`,
     )
   }
 
-  return result.stdout ?? ""
+  if (result?.error) {
+    throw new Error(
+      "git status failed to start",
+    )
+  }
+
+  if (
+    typeof result?.signal === "string" &&
+    result.signal !== ""
+  ) {
+    throw new Error(
+      `git status terminated by signal: ${result.signal}`,
+    )
+  } else if (
+    result?.signal !== null &&
+    result?.signal !== undefined
+  ) {
+    throw new Error(
+      "git status terminated by signal",
+    )
+  }
+
+  if (result?.status !== 0) {
+    throw new Error(
+      `git status failed (exit ${String(result?.status)})`,
+    )
+  }
+
+  if (typeof result?.stdout !== "string") {
+    throw new Error(
+      "git status produced unusable output",
+    )
+  }
+
+  return result.stdout
+}
+
+export function gitStatus(
+  worktree: string,
+  deps?: {
+    lstatSync?: (path: string) => unknown
+    spawnSync?: (
+      command: string,
+      args: string[],
+      options: {
+        encoding: "utf8"
+        maxBuffer: number
+        timeout: number
+      },
+    ) => {
+      error?: unknown
+      status?: number | null
+      signal?: unknown
+      stdout?: unknown
+    }
+  },
+): string {
+  const lstat = deps?.lstatSync ?? lstatSync
+
+  // Intentional non-Git workspaces stay supported; any present (even
+  // inaccessible, dangling, or malformed) Git metadata must fail closed
+  // below. Only ENOENT means ".git is absent". lstat (not existsSync, and
+  // not stat) is used so dangling symlinks and permission errors are not
+  // misreported as absent: existsSync swallows EACCES as false and stat
+  // follows symlinks, while lstat succeeds on a dangling link and lets
+  // git itself fail closed on it.
+  try {
+    lstat(join(worktree, ".git"))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ""
+
+    throw new Error(
+      "git status failed: unable to inspect git metadata",
+    )
+  }
+
+  const spawn = deps?.spawnSync ?? spawnSync
+
+  let result: {
+    error?: unknown
+    status?: number | null
+    signal?: unknown
+    stdout?: unknown
+  }
+
+  try {
+    result = spawn(
+      "/usr/bin/git",
+      [
+        "-C",
+        worktree,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=normal",
+      ],
+      gitStatusSpawnOptions(),
+    )
+  } catch {
+    throw new Error(
+      "git status failed to start",
+    )
+  }
+
+  return resolveGitStatusOutput(result)
 }
 
 function statusDelta(before: string, after: string): string[] {

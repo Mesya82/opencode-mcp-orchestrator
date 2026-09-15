@@ -95,6 +95,10 @@ export function resolveLinkedGitMetadata(
       isFile(): boolean
       size: number
     }
+    readonly lstatSync?: (path: string) => {
+      isDirectory(): boolean
+      isFile(): boolean
+    }
     readonly env?: NodeJS.ProcessEnv
   },
 ): { linkedGitDir: string; commonDir: string } | null
@@ -113,6 +117,10 @@ export function buildBaseSandboxArgv(
     readonly existsSync?: (path: string) => boolean
     readonly readFileSync?: (path: string, encoding: "utf8") => string
     readonly realpathSync?: (path: string) => string
+    readonly lstatSync?: (path: string) => {
+      isDirectory(): boolean
+      isFile(): boolean
+    }
     readonly statSync?: (path: string) => {
       isDirectory(): boolean
       isFile(): boolean

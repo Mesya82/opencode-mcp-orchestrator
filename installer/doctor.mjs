@@ -38,9 +38,12 @@ import {
 } from "./codex-config.mjs"
 
 import {
+  bubblewrapFailureDetail,
+  checkBubblewrapVersion,
   commandExists,
   isExecutableFile,
   isProbeTimeoutResult,
+  LAUNCHER_PREREQUISITE_PATHS,
   probeTimeoutMessage,
   SUBPROCESS_PROBE_TIMEOUT_MS,
 } from "./path-security.mjs"
@@ -163,7 +166,11 @@ if (process.platform === "linux") {
 console.log()
 console.log("Launcher prerequisites")
 
-for (const exact of ["/bin/bash", "/usr/bin/python3"]) {
+for (const exact of LAUNCHER_PREREQUISITE_PATHS) {
+  if (exact === "/usr/bin/bwrap") {
+    continue
+  }
+
   if (isExecutableFile(exact)) {
     ok(`${exact} (exact launcher path)`)
   } else {
@@ -171,18 +178,23 @@ for (const exact of ["/bin/bash", "/usr/bin/python3"]) {
   }
 }
 
-if (isExecutableFile("/usr/bin/bwrap")) {
-  ok("/usr/bin/bwrap (exact production path)")
-} else if (commandExists("bwrap")) {
-  fail("/usr/bin/bwrap missing or not executable (exact production path required)")
-} else {
-  fail("bubblewrap not found")
-}
+{
+  if (!isExecutableFile("/usr/bin/bwrap")) {
+    if (commandExists("bwrap")) {
+      fail("/usr/bin/bwrap missing or not executable (exact production path required)")
+    } else {
+      fail("bubblewrap not found")
+    }
+  } else {
+    const bwrapStatus =
+      checkBubblewrapVersion(spawnSync)
 
-if (commandExists("git")) {
-  ok("Git")
-} else {
-  fail("Git not found")
+    if (bwrapStatus.ok) {
+      ok(`/usr/bin/bwrap ${bwrapStatus.version.text} (exact production path)`)
+    } else {
+      fail(`Bubblewrap: ${bubblewrapFailureDetail(bwrapStatus)}`)
+    }
+  }
 }
 
 if (
@@ -515,7 +527,11 @@ if (!args.sandboxProbes) {
 console.log()
 
 if (failures === 0) {
-  console.log("DOCTOR_HEALTHY")
+  if (args.sandboxProbes) {
+    console.log("DOCTOR_HEALTHY")
+  } else {
+    console.log("DOCTOR_READINESS_UNVERIFIED")
+  }
   process.exit(0)
 }
 

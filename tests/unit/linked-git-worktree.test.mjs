@@ -149,7 +149,8 @@ test("normal .git directory fixtures are preserved (no extra mounts)", () => {
 })
 
 test("negative fixtures fail closed: malformed, escape, mismatch, broad", () => {
-  // Malformed .git file.
+  // Malformed .git file: resolver returns null AND builder throws
+  // fail-closed (no raw bind of attacker-shaped content).
   {
     const base = mkdtempSync(join(tmpdir(), "linked-git-bad-"))
     try {
@@ -157,8 +158,10 @@ test("negative fixtures fail closed: malformed, escape, mismatch, broad", () => 
       mkdirSync(ws, { recursive: true })
       writeFileSync(join(ws, ".git"), "not-a-gitdir-pointer\n")
       assert.equal(resolveLinkedGitMetadata(ws), null)
-      const argv = buildBaseSandboxArgv(ws, "/workspace", { safePath: "/usr/bin" })
-      assert.deepEqual(roBindTargets(argv, join(base, "evil")), [])
+      assert.throws(
+        () => buildBaseSandboxArgv(ws, "/workspace", { safePath: "/usr/bin" }),
+        /invalid Git metadata/,
+      )
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
@@ -221,16 +224,24 @@ test("negative fixtures fail closed: malformed, escape, mismatch, broad", () => 
   }
 
   // Symlinked .git file escaping to unrelated metadata fails closed.
+  // Builder must throw fail-closed and add no bind of the symlink target.
   {
     const base = mkdtempSync(join(tmpdir(), "linked-git-symlink-"))
     try {
       const ws = join(base, "ws")
       const other = join(base, "other")
+      const hostSecret = join(base, "host-secret")
       mkdirSync(ws, { recursive: true })
       mkdirSync(other, { recursive: true })
+      mkdirSync(hostSecret, { recursive: true })
+      writeFileSync(join(hostSecret, "secret.txt"), "host-secret\n")
       writeFileSync(join(other, ".git"), "gitdir: /definitely/not/here\n")
-      symlinkSync(join(other, ".git"), join(ws, ".git"))
+      symlinkSync(join(hostSecret, "secret.txt"), join(ws, ".git"))
       assert.equal(resolveLinkedGitMetadata(ws), null)
+      assert.throws(
+        () => buildBaseSandboxArgv(ws, "/workspace", { safePath: "/usr/bin" }),
+        /invalid Git metadata/,
+      )
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
@@ -243,6 +254,7 @@ test("negative fixtures fail closed: oversized/nonregular pointers never read, v
     let reads = 0
     const oversized = resolveLinkedGitMetadata("/tmp/ws-oversized-probe", {
       existsSync: () => true,
+      lstatSync: () => ({ isFile: () => true, isDirectory: () => false }),
       readFileSync: () => {
         reads += 1
         return "gitdir: /x\n"
@@ -260,6 +272,7 @@ test("negative fixtures fail closed: oversized/nonregular pointers never read, v
     let reads = 0
     const nonregular = resolveLinkedGitMetadata("/tmp/ws-nonregular-probe", {
       existsSync: () => true,
+      lstatSync: () => ({ isFile: () => true, isDirectory: () => false }),
       readFileSync: () => {
         reads += 1
         return "gitdir: /x\n"
@@ -269,6 +282,25 @@ test("negative fixtures fail closed: oversized/nonregular pointers never read, v
       env: { ...process.env, HOME: "/tmp/ws-nonregular-probe-home-missing" },
     })
     assert.equal(nonregular, null)
+    assert.equal(reads, 0)
+  }
+
+  // Lexical non-regular .git (FIFO/device/other): lstat reports neither
+  // file nor directory, so resolver rejects before any read.
+  {
+    let reads = 0
+    const fifoLike = resolveLinkedGitMetadata("/tmp/ws-fifo-probe", {
+      existsSync: () => true,
+      lstatSync: () => ({ isFile: () => false, isDirectory: () => false }),
+      readFileSync: () => {
+        reads += 1
+        return "gitdir: /x\n"
+      },
+      realpathSync: (p) => p,
+      statSync: () => ({ isFile: () => true, isDirectory: () => false, size: 12 }),
+      env: { ...process.env, HOME: "/tmp/ws-fifo-probe-home-missing" },
+    })
+    assert.equal(fifoLike, null)
     assert.equal(reads, 0)
   }
 
@@ -285,9 +317,178 @@ test("negative fixtures fail closed: oversized/nonregular pointers never read, v
       symlinkSync(target, join(linked, ".git"))
       // Target content is otherwise valid, but the .git symlink itself rejects.
       assert.equal(resolveLinkedGitMetadata(linked), null)
+      assert.throws(
+        () => buildBaseSandboxArgv(linked, "/workspace", { safePath: "/usr/bin" }),
+        /invalid Git metadata/,
+      )
     } finally {
       rmSync(base, { recursive: true, force: true })
     }
+  }
+
+  // Builder-level symlink-to-host regression: .git symlink to an arbitrary
+  // host path must throw and never emit a bind referencing the host target.
+  {
+    const base = mkdtempSync(join(tmpdir(), "linked-git-builder-symlink-"))
+    try {
+      const ws = join(base, "ws")
+      const hostTarget = join(base, "host-evil.txt")
+      mkdirSync(ws, { recursive: true })
+      writeFileSync(hostTarget, "host\n")
+      symlinkSync(hostTarget, join(ws, ".git"))
+      assert.equal(resolveLinkedGitMetadata(ws), null)
+      assert.throws(
+        () => buildBaseSandboxArgv(ws, "/workspace", { safePath: "/usr/bin" }),
+        /invalid Git metadata/,
+      )
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  }
+})
+
+function makeDeterministicRelativeFixture({ relativeBackpointer = false } = {}) {
+  const base = mkdtempSync(join(tmpdir(), "linked-git-relative-"))
+  const ws = join(base, "ws")
+  const commonGit = join(base, "common", ".git")
+  const privateGitDir = join(commonGit, "worktrees", "wt")
+  mkdirSync(ws, { recursive: true })
+  mkdirSync(privateGitDir, { recursive: true })
+  mkdirSync(join(commonGit, "objects"), { recursive: true })
+  writeFileSync(join(commonGit, "HEAD"), "ref: refs/heads/main\n")
+  writeFileSync(join(privateGitDir, "commondir"), "../..\n")
+  const backTarget = relativeBackpointer
+    ? join("..", "..", "..", "..", "ws", ".git")
+    : join(ws, ".git")
+  writeFileSync(join(privateGitDir, "gitdir"), `${backTarget}\n`)
+  // Relative gitdir pointer: resolves relative to dirname(<ws>/.git).
+  writeFileSync(join(ws, ".git"), "gitdir: ../common/.git/worktrees/wt\n")
+  return { base, ws, commonGit, privateGitDir }
+}
+
+test("deterministic relative gitdir + commondir fixture resolves and mounts", () => {
+  for (const relativeBackpointer of [false, true]) {
+    const { base, ws, commonGit, privateGitDir } = makeDeterministicRelativeFixture({ relativeBackpointer })
+    try {
+      const resolved = resolveLinkedGitMetadata(ws)
+      assert.ok(resolved)
+      assert.equal(resolved.linkedGitDir, privateGitDir)
+      assert.equal(resolved.commonDir, commonGit)
+      const argv = buildBaseSandboxArgv(ws, "/workspace", { safePath: "/usr/bin" })
+      assert.equal(hasTriple(argv, "--ro-bind", `${ws}/.git`, "/workspace/.git"), true)
+      assert.equal(hasTriple(argv, "--ro-bind", privateGitDir, privateGitDir), true)
+      assert.equal(hasTriple(argv, "--ro-bind", commonGit, commonGit), true)
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  }
+})
+
+test("builder git lexical validation: symlink-to-dir, lstat EACCES, absent .git", () => {
+  // Symlink-to-directory .git must fail closed, never raw-bind.
+  {
+    const base = mkdtempSync(join(tmpdir(), "linked-git-symlink-dir-"))
+    try {
+      const ws = join(base, "ws")
+      const realDir = join(base, "real-git-dir")
+      mkdirSync(ws, { recursive: true })
+      mkdirSync(realDir, { recursive: true })
+      writeFileSync(join(realDir, "HEAD"), "ref: refs/heads/main\n")
+      symlinkSync(realDir, join(ws, ".git"))
+      assert.equal(resolveLinkedGitMetadata(ws), null)
+      assert.throws(
+        () => buildBaseSandboxArgv(ws, "/workspace", { safePath: "/usr/bin" }),
+        /invalid Git metadata/,
+      )
+    } finally {
+      rmSync(base, { recursive: true, force: true })
+    }
+  }
+
+  // Injected lstat EACCES must throw a bounded explicit error even when
+  // existsSync reports false (no existsSync fallback masking).
+  {
+    const eacces = () => {
+      const error = new Error("EACCES: permission denied")
+      error.code = "EACCES"
+      throw error
+    }
+    assert.throws(
+      () => buildBaseSandboxArgv("/tmp/ws-eacces-probe", "/workspace", {
+        safePath: "/usr/bin",
+        lstatSync: eacces,
+        existsSync: () => false,
+      }),
+      /invalid Git metadata: cannot stat \.git/,
+    )
+  }
+
+  // Injected realpath directory mismatch must fail closed before any raw
+  // bind: canonical .git dir differs from the lexical path.
+  {
+    assert.throws(
+      () => buildBaseSandboxArgv("/tmp/ws-dir-mismatch-probe", "/workspace", {
+        safePath: "/usr/bin",
+        lstatSync: () => ({ isFile: () => false, isDirectory: () => true }),
+        realpathSync: (p) => (p === "/tmp/ws-dir-mismatch-probe/.git" ? "/tmp/host-evil-git" : p),
+        statSync: () => ({ isFile: () => false, isDirectory: () => true, size: 4096 }),
+      }),
+      /invalid Git metadata: \.git directory mismatch/,
+    )
+  }
+
+  // Absent .git (lstat ENOENT) remains supported with no git binds.
+  {
+    const enoent = () => {
+      const error = new Error("ENOENT: no such file or directory")
+      error.code = "ENOENT"
+      throw error
+    }
+    const argv = buildBaseSandboxArgv("/tmp/ws-absent-git-probe", "/workspace", {
+      safePath: "/usr/bin",
+      lstatSync: enoent,
+      existsSync: () => false,
+    })
+    assert.equal(hasTriple(argv, "--ro-bind", "/tmp/ws-absent-git-probe/.git", "/workspace/.git"), false)
+    assert.equal(roBindTargets(argv, "/tmp/ws-absent-git-probe/.git").length, 0)
+  }
+})
+
+test("real git worktree add --relative-paths resolves when supported", { skip: gitAvailable() ? false : "git missing" }, (t) => {
+  const probe = mkdtempSync(join(tmpdir(), "linked-git-relprobe-"))
+  try {
+    const primary = join(probe, "primary")
+    mkdirSync(primary, { recursive: true })
+    let r = spawnSync("git", ["init", "--quiet"], { cwd: primary, encoding: "utf8" })
+    assert.equal(r.status, 0, r.stderr)
+    spawnSync("git", ["config", "user.email", "t@t.t"], { cwd: primary })
+    spawnSync("git", ["config", "user.name", "t"], { cwd: primary })
+    writeFileSync(join(primary, "f.txt"), "hi\n")
+    spawnSync("git", ["add", "f.txt"], { cwd: primary })
+    r = spawnSync("git", ["commit", "-qm", "init"], { cwd: primary, encoding: "utf8" })
+    assert.equal(r.status, 0, r.stderr)
+    const linked = join(probe, "linked")
+    r = spawnSync("git", ["worktree", "add", "--relative-paths", linked], { cwd: primary, encoding: "utf8" })
+    if (r.status !== 0) {
+      // Feature-detect only: skip solely on the recognized unknown-option
+      // result. Any other Git failure is a hard failure, never a silent pass.
+      if (/unknown option|unrecognized/i.test(`${r.stderr}${r.stdout}`)) {
+        t.skip("git worktree --relative-paths unsupported on this Git")
+        return
+      }
+      assert.fail(`git worktree add --relative-paths failed: ${r.status} ${r.stderr}${r.stdout}`)
+    }
+    const raw = readFileSync(join(linked, ".git"), "utf8")
+    // Confirm the fixture is genuinely relative before asserting resolution.
+    assert.ok(!raw.slice("gitdir: ".length).trim().startsWith("/"), `expected relative gitdir, got: ${raw}`)
+    const resolved = resolveLinkedGitMetadata(linked)
+    assert.ok(resolved)
+    assert.ok(resolved.commonDir.endsWith("/.git"))
+    const argv = buildBaseSandboxArgv(linked, "/workspace", { safePath: "/usr/bin" })
+    assert.equal(hasTriple(argv, "--ro-bind", resolved.linkedGitDir, resolved.linkedGitDir), true)
+    assert.equal(hasTriple(argv, "--ro-bind", resolved.commonDir, resolved.commonDir), true)
+  } finally {
+    rmSync(probe, { recursive: true, force: true })
   }
 })
 

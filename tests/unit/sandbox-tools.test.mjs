@@ -43,6 +43,7 @@ import sandboxPlugin, {
   baseSandboxArgs,
   buildSandboxRunArgv,
   ensureRunnerRoot,
+  gitStatus,
   gitStatusSpawnOptions,
   isSpawnTimeout,
   parseSandboxToolchainEntries,
@@ -50,6 +51,7 @@ import sandboxPlugin, {
   loadSandboxRuntimeConfig,
   resolveSandboxRuntimeCapabilities,
   resolveSandboxCwd,
+  resolveGitStatusOutput,
   resolveSessionWorktree,
   resolveRunnerLogLimitBytes,
   resolveRunnerRetentionCount,
@@ -777,8 +779,16 @@ test("toolchain dangerous, missing, relative, and non-directory entries fail clo
     "/sys/kernel",
     "/etc/ssl",
   ]) {
+    // Deterministic even when the denied root is missing inside a sandbox:
+    // inject an existing-directory canonicalization so the broad-root
+    // rejection itself is exercised rather than a missing-path error.
     assert.throws(
-      () => resolveSandboxToolchainDirs(denied),
+      () =>
+        resolveSandboxToolchainDirs(denied, {
+          home: join(tmpdir(), "toolchain-broad-home-xyz"),
+          realpathSync: (entry) => entry,
+          statSync: () => ({ isDirectory: () => true }),
+        }),
       /broad/,
       denied,
     )
@@ -1648,4 +1658,154 @@ test("sandbox_shell resolves and mounts each executing session worktree", async 
       })
     }
   }
+})
+
+test("gitStatus fails closed on spawn error, signal, and nonzero exit", () => {
+  const gitWorktree = mkdtempSync(join(tmpdir(), "gitstatus-fail-"))
+  mkdirSync(join(gitWorktree, ".git"), { recursive: true })
+  try {
+    const lstatYes = () => ({})
+    const spawnFail = () => ({ error: new Error("spawn ENOENT") })
+    assert.throws(
+      () => gitStatus(gitWorktree, { lstatSync: lstatYes, spawnSync: spawnFail }),
+      /failed to start/,
+    )
+    assert.throws(
+      () => gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => ({ error: { code: "ETIMEDOUT" }, status: null, signal: null }),
+      }),
+      new RegExp(`timed out after ${GIT_STATUS_TIMEOUT_MS}ms`),
+    )
+    assert.throws(
+      () => gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => ({ status: 128, signal: null, stdout: "" }),
+      }),
+      /exit 128/,
+    )
+    assert.throws(
+      () => gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => ({ status: null, signal: "SIGKILL", stdout: "" }),
+      }),
+      /signal/,
+    )
+    assert.throws(
+      () => gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => ({ status: 0, signal: null, stdout: undefined }),
+      }),
+      /unusable output/,
+    )
+    assert.throws(
+      () => gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => { throw new Error("spawn threw synchronously") },
+      }),
+      /failed to start/,
+    )
+    assert.equal(
+      gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => ({ status: 0, signal: null, stdout: " M file.txt\n" }),
+      }),
+      " M file.txt\n",
+    )
+    // Intentional non-Git workspaces stay supported without spawning git.
+    assert.equal(
+      gitStatus(gitWorktree, {
+        lstatSync: () => { throw Object.assign(new Error("no such file"), { code: "ENOENT" }) },
+        spawnSync: () => { throw new Error("must not spawn") },
+      }),
+      "",
+    )
+    // EACCES inspecting .git metadata must fail closed with a fixed
+    // bounded message (no unbounded error.message interpolation).
+    {
+      let thrown = null
+      try {
+        gitStatus(gitWorktree, {
+          lstatSync: () => { throw Object.assign(new Error("permission denied EACCES-secret-leak"), { code: "EACCES" }) },
+          spawnSync: () => { throw new Error("must not spawn") },
+        })
+      } catch (error) {
+        thrown = error
+      }
+      assert.ok(thrown, "must throw")
+      assert.match(thrown.message, /unable to inspect git metadata/)
+      assert.ok(!thrown.message.includes("EACCES-secret-leak"), "must not interpolate error text")
+      assert.ok(!thrown.message.includes("EACCES"), "must use fixed bounded message")
+      // Unknown inspection failure also uses the fixed bounded message.
+      assert.throws(
+        () => gitStatus(gitWorktree, {
+          lstatSync: () => { throw Object.assign(new Error("weird-custom-xyz"), { code: "WEIRD" }) },
+          spawnSync: () => { throw new Error("must not spawn") },
+        }),
+        (error) => {
+          assert.match(error.message, /unable to inspect git metadata/)
+          assert.ok(!error.message.includes("weird-custom-xyz"))
+          return true
+        },
+      )
+    }
+    // Dangling .git symlink: lstat succeeds so git must run and a git
+    // failure must surface rather than returning empty.
+    assert.throws(
+      () => gitStatus(gitWorktree, {
+        lstatSync: lstatYes,
+        spawnSync: () => ({ status: 128, signal: null, stdout: "" }),
+      }),
+      /exit 128/,
+    )
+  } finally {
+    rmSync(gitWorktree, { recursive: true, force: true })
+  }
+})
+
+test("gitStatus runs git on a dangling .git symlink instead of returning empty", () => {
+  const worktree = mkdtempSync(join(tmpdir(), "gitstatus-dangling-"))
+  try {
+    symlinkSync(
+      join(worktree, "missing-target-xyz"),
+      join(worktree, ".git"),
+    )
+    // Real lstat succeeds on the dangling link, so the injected failing
+    // git proves gitStatus delegates to git rather than short-circuiting.
+    assert.throws(
+      () => gitStatus(worktree, {
+        spawnSync: () => ({ status: 128, signal: null, stdout: "" }),
+      }),
+      /exit 128/,
+    )
+  } finally {
+    rmSync(worktree, { recursive: true, force: true })
+  }
+})
+
+test("gitStatus treats broken git metadata as failure, not unchanged", () => {
+  const broken = mkdtempSync(join(tmpdir(), "gitstatus-broken-"))
+  try {
+    const initialized = spawnSync("git", ["init", "--quiet"], {
+      cwd: broken,
+      encoding: "utf8",
+    })
+    assert.equal(initialized.status, 0, initialized.stderr)
+    // Corrupt the metadata so real git exits nonzero (bad HEAD revision).
+    writeFileSync(join(broken, ".git", "HEAD"), "garbage-not-a-ref!!!\n")
+    assert.throws(() => gitStatus(broken), /failed|terminated|unusable|timed out/)
+  } finally {
+    rmSync(broken, { recursive: true, force: true })
+  }
+})
+
+test("resolveGitStatusOutput preserves timeout errors and rejects bad shapes", () => {
+  assert.throws(
+    () => resolveGitStatusOutput({ error: { code: "ETIMEDOUT" } }),
+    new RegExp(`timed out after ${GIT_STATUS_TIMEOUT_MS}ms`),
+  )
+  assert.throws(() => resolveGitStatusOutput({ error: new Error("x") }), /failed to start/)
+  assert.throws(() => resolveGitStatusOutput({ status: 1, signal: null, stdout: "" }), /exit 1/)
+  assert.throws(() => resolveGitStatusOutput({ status: 0, signal: null, stdout: 42 }), /unusable output/)
+  assert.equal(resolveGitStatusOutput({ status: 0, signal: null, stdout: "" }), "")
 })

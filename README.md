@@ -65,11 +65,13 @@ Runtime requirements:
 
 - Node.js 20 or newer
 - OpenCode
-- Bubblewrap at the exact production path `/usr/bin/bwrap`
-- Git
-- Exact launcher paths `/bin/bash` and `/usr/bin/python3` (production
+- Bubblewrap at the exact production path `/usr/bin/bwrap` (version >=0.12.0; GHSA-pxhw-h44j-8pfx affects <0.12.0)
+- Git at the exact launcher path `/usr/bin/git`
+- Exact launcher paths `/usr/bin/bash` and `/usr/bin/python3` (production
   launches these absolute paths; a `PATH` substitute does not satisfy the
-  check; each must exist, be executable, and not be a directory)
+  check; each must exist, be executable, and not be a directory; inside the
+  sandbox `/usr` is ro-bound with `usr/bin` mapped to `/bin`, so production
+  `/bin/bash` uses host `/usr/bin/bash`)
 
 For the corresponding parent integrations:
 
@@ -518,8 +520,8 @@ Installed releases contain:
 
 The doctor checks:
 
-- runtime prerequisites, including the exact launcher paths `/bin/bash`,
-  `/usr/bin/python3`, and production Bubblewrap `/usr/bin/bwrap` (each must
+- runtime prerequisites, including the exact launcher paths `/usr/bin/bash`,
+  `/usr/bin/python3`, `/usr/bin/git`, and production Bubblewrap `/usr/bin/bwrap` >=0.12.0 (GHSA-pxhw-h44j-8pfx affects <0.12.0; each must
   exist, be executable, and not be a directory; checked even with
   `--no-sandbox-probes`, so Doctor never reports `DOCTOR_HEALTHY` when a
   launcher dependency is missing)
@@ -544,6 +546,8 @@ as unverified when probes are skipped.
 A healthy installation ends with:
 
     DOCTOR_HEALTHY
+
+With `--no-sandbox-probes` and all other checks passing, Doctor exits 0 and ends with `DOCTOR_READINESS_UNVERIFIED` instead (never `DOCTOR_HEALTHY` for skipped probes).
 
 ## Uninstall
 

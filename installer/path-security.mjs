@@ -87,16 +87,19 @@ export function commandExists(name) {
 /*
  * Exact-path launcher prerequisite check without spawning a shell.
  *
- * Production launches fixed absolute paths (/bin/bash --noprofile --norc,
- * /usr/bin/python3, /usr/bin/bwrap). A PATH substitute must not satisfy
- * this check: only the exact path counts, and it must be an executable
- * regular file (following executable symlinks). Injectable filesystem overrides keep unit
- * tests deterministic without touching the real filesystem.
+ * Production launches fixed absolute paths (/usr/bin/bash, /usr/bin/python3,
+ * /usr/bin/bwrap, /usr/bin/git). The sandbox builder ro-binds host /usr and
+ * maps usr/bin to /bin, so production /bin/bash uses host /usr/bin/bash.
+ * A PATH substitute must not satisfy this check: only the exact path counts,
+ * and it must be an executable regular file (following executable symlinks).
+ * Injectable filesystem overrides keep unit tests deterministic without
+ * touching the real filesystem.
  */
 export const LAUNCHER_PREREQUISITE_PATHS = Object.freeze([
-  "/bin/bash",
+  "/usr/bin/bash",
   "/usr/bin/python3",
   "/usr/bin/bwrap",
+  "/usr/bin/git",
 ])
 
 export function isExecutableFile(path, overrides = {}) {
@@ -284,6 +287,174 @@ export function resolveCatalogCwd(value) {
  * is intentionally excluded; only short probes use this timeout.
  */
 export const SUBPROCESS_PROBE_TIMEOUT_MS = 20000
+
+export const BWRAP_EXECUTABLE_PATH = "/usr/bin/bwrap"
+export const BWRAP_MINIMUM_VERSION = "0.12.0"
+export const BWRAP_MINIMUM_VERSION_PARTS = Object.freeze([0, 12, 0])
+export const BWRAP_VERSION_MAX_BUFFER_BYTES = 65536
+
+/*
+ * Strict stable Bubblewrap version parser.
+ *
+ * Accepts only a bare numeric `bubblewrap X.Y.Z` token. Any prerelease,
+ * suffix, or build metadata directly attached to the patch component
+ * (for example `0.12.0-1`, `0.12.0~bpo`, `0.12.0+deb`, `0.12.0rc1`,
+ * `0.12.0.1`) is rejected as unverified: only strict numeric stable
+ * versions are trusted, with no backport exceptions.
+ */
+export function parseBubblewrapVersion(output) {
+  if (typeof output !== "string") {
+    return null
+  }
+
+  const match =
+    output.match(/bubblewrap\s+(\d+)\.(\d+)\.(\d+)/i)
+
+  if (!match) {
+    return null
+  }
+
+  const after =
+    output.slice(
+      (match.index ?? 0) + match[0].length,
+    )
+
+  if (after.trim() !== "") {
+    return null
+  }
+
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  const patch = Number(match[3])
+
+  if (
+    !Number.isInteger(major) ||
+    !Number.isInteger(minor) ||
+    !Number.isInteger(patch) ||
+    major < 0 ||
+    minor < 0 ||
+    patch < 0 ||
+    !Number.isSafeInteger(major) ||
+    !Number.isSafeInteger(minor) ||
+    !Number.isSafeInteger(patch)
+  ) {
+    return null
+  }
+
+  return {
+    major,
+    minor,
+    patch,
+    text: `${major}.${minor}.${patch}`,
+  }
+}
+
+export function isSecureBubblewrapVersion(version) {
+  if (!version) {
+    return false
+  }
+
+  const [minMajor, minMinor, minPatch] =
+    BWRAP_MINIMUM_VERSION_PARTS
+
+  if (version.major !== minMajor) {
+    return version.major > minMajor
+  }
+
+  if (version.minor !== minMinor) {
+    return version.minor > minMinor
+  }
+
+  return version.patch >= minPatch
+}
+
+/*
+ * Pure evaluator for an exact `/usr/bin/bwrap --version` spawnSync result.
+ * Never echoes stdout/stderr. Rejects old, unparseable, nonzero, spawn
+ * error, signal, and timeout results.
+ */
+export function evaluateBubblewrapResult(result) {
+  if (!result || result.error) {
+    if (isProbeTimeoutResult(result)) {
+      return { ok: false, version: null, reason: "timeout" }
+    }
+
+    return { ok: false, version: null, reason: "spawn-error" }
+  }
+
+  if (result.signal != null) {
+    return { ok: false, version: null, reason: "signal" }
+  }
+
+  if (result.status !== 0) {
+    return { ok: false, version: null, reason: "nonzero" }
+  }
+
+  const version =
+    parseBubblewrapVersion(
+      String(result.stdout ?? ""),
+    )
+
+  if (!version) {
+    return { ok: false, version: null, reason: "unparseable" }
+  }
+
+  if (!isSecureBubblewrapVersion(version)) {
+    return { ok: false, version, reason: "vulnerable" }
+  }
+
+  return { ok: true, version, reason: "ok" }
+}
+
+export function bubblewrapRequirementMessage() {
+  return (
+    `Bubblewrap >=${BWRAP_MINIMUM_VERSION} required at ` +
+    `${BWRAP_EXECUTABLE_PATH} (GHSA-pxhw-h44j-8pfx affects <${BWRAP_MINIMUM_VERSION})`
+  )
+}
+
+export function bubblewrapFailureDetail(status) {
+  if (status?.reason === "timeout") {
+    return `${probeCommandName(BWRAP_EXECUTABLE_PATH)} probe timed out`
+  }
+
+  return bubblewrapRequirementMessage()
+}
+
+/*
+ * Probes the exact production path `/usr/bin/bwrap --version` with the
+ * shared subprocess probe timeout and a bounded buffer. Accepts an
+ * injectable spawnSync implementation so unit tests stay deterministic.
+ */
+export function checkBubblewrapVersion(spawnImpl) {
+  const spawnFn =
+    typeof spawnImpl === "function"
+      ? spawnImpl
+      : null
+
+  if (!spawnFn) {
+    return { ok: false, version: null, reason: "spawn-error" }
+  }
+
+  let result = null
+
+  try {
+    result =
+      spawnFn(
+        BWRAP_EXECUTABLE_PATH,
+        ["--version"],
+        {
+          encoding: "utf8",
+          timeout: SUBPROCESS_PROBE_TIMEOUT_MS,
+          maxBuffer: BWRAP_VERSION_MAX_BUFFER_BYTES,
+        },
+      )
+  } catch {
+    return { ok: false, version: null, reason: "spawn-error" }
+  }
+
+  return evaluateBubblewrapResult(result)
+}
 
 export function probeCommandName(command) {
   const text =

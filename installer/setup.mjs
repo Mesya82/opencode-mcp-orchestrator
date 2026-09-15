@@ -33,9 +33,12 @@ import {
 
 import {
   assertSafeRecursiveTarget,
+  bubblewrapFailureDetail,
+  checkBubblewrapVersion,
   commandExists,
   environmentPaths,
   isExecutableFile,
+  LAUNCHER_PREREQUISITE_PATHS,
 } from "./path-security.mjs"
 
 const here =
@@ -260,17 +263,21 @@ console.log(
   "Checking prerequisites..."
 )
 
-const prerequisites = [
-  ["Git", "git"],
-]
-
 let prerequisiteFailure = false
 
-for (const exact of ["/bin/bash", "/usr/bin/python3"]) {
+for (const exact of LAUNCHER_PREREQUISITE_PATHS) {
   if (isExecutableFile(exact)) {
+    if (exact !== "/usr/bin/bwrap") {
+      console.log(
+        `  ✓ ${exact} (exact launcher path)`,
+      )
+    }
+  } else if (exact === "/usr/bin/bwrap") {
     console.log(
-      `  ✓ ${exact} (exact launcher path)`,
+      "  ✗ Bubblewrap (/usr/bin/bwrap missing or not executable)",
     )
+
+    prerequisiteFailure = true
   } else {
     console.log(
       `  ✗ ${exact} missing or not executable (exact launcher path required)`,
@@ -280,16 +287,21 @@ for (const exact of ["/bin/bash", "/usr/bin/python3"]) {
   }
 }
 
-if (isExecutableFile("/usr/bin/bwrap")) {
-  console.log(
-    "  ✓ Bubblewrap (/usr/bin/bwrap)",
-  )
-} else {
-  console.log(
-    "  ✗ Bubblewrap (/usr/bin/bwrap missing or not executable)",
-  )
+if (!prerequisiteFailure) {
+  const bwrapStatus =
+    checkBubblewrapVersion(spawnSync)
 
-  prerequisiteFailure = true
+  if (bwrapStatus.ok) {
+    console.log(
+      `  ✓ Bubblewrap (/usr/bin/bwrap ${bwrapStatus.version.text})`,
+    )
+  } else {
+    console.log(
+      `  ✗ Bubblewrap: ${bubblewrapFailureDetail(bwrapStatus)}`,
+    )
+
+    prerequisiteFailure = true
+  }
 }
 
 const openCodeBinary =
@@ -312,23 +324,6 @@ if (openCodeBinary) {
   )
 
   prerequisiteFailure = true
-}
-
-for (
-  const [label, command]
-  of prerequisites
-) {
-  if (commandExists(command)) {
-    console.log(
-      `  ✓ ${label}`,
-    )
-  } else {
-    console.log(
-      `  ✗ ${label} (${command} not found)`,
-    )
-
-    prerequisiteFailure = true
-  }
 }
 
 if (process.platform !== "linux") {

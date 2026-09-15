@@ -91,7 +91,26 @@ test("probe argv carries shared isolation and no host mounts", () => {
     assert.ok(argv.includes("--unshare-net"))
     assert.ok(argv.includes("--clearenv"))
     assert.equal(argv[0], "/usr/bin/bwrap")
-    assert.ok(!argv.includes(process.env.HOME ?? "\0-unset-home"))
+    // Distinguish host mount sources from the synthetic sandbox HOME
+    // (/home/sandbox set via --setenv, never a host bind source): only
+    // --bind/--ro-bind sources count as mounts. The sandbox HOME value
+    // itself is expected in argv and must not trip this assertion.
+    const hostHome = process.env.HOME
+    if (typeof hostHome === "string" && hostHome !== "" && hostHome !== "/home/sandbox") {
+      const bindSources = []
+      for (let i = 0; i + 2 < argv.length; i += 1) {
+        if (argv[i] === "--bind" || argv[i] === "--ro-bind") bindSources.push(argv[i + 1])
+      }
+      assert.ok(!bindSources.includes(hostHome), `mounts host HOME: ${hostHome}`)
+    }
+    // No host credential mount invariant (kept strict): never bind a
+    // host sensitive dotpath as its own source.
+    for (let i = 0; i + 2 < argv.length; i += 1) {
+      if (argv[i] === "--bind" || argv[i] === "--ro-bind") {
+        const src = argv[i + 1]
+        assert.ok(!src.endsWith("/.ssh") && !src.endsWith("/.gnupg") && !src.endsWith("/.aws"), `host credential mount: ${src}`)
+      }
+    }
   }
 })
 
