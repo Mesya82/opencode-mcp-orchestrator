@@ -189,10 +189,10 @@ exposure, and installed-bundle regression coverage.
 
 ## Remaining work from this review lineage
 
-The nine original findings have source fixes. PR #5's Doctor readiness work
-still has a review/verification gate; it is not merge-ready. Remaining work
-consists of that gate, ongoing regression coverage, and explicitly deferred
-scope:
+The nine original findings have source fixes. PR #5's Doctor readiness review
+gate is resolved by the shared-builder work and passing clean-container
+verification recorded below. Remaining work consists of ongoing regression
+coverage and explicitly deferred scope:
 
 - PR #5 review follow-up (2026-09-15): the Docker clean-container job failed
   at the required networkless Bubblewrap preflight, and Doctor independently
@@ -206,8 +206,12 @@ scope:
   configured runtime/toolchain cases. Git-write checks fail immediately on a
   forbidden write through either alias; Runner output is unique and always
   cleaned up. Full build/unit/integration tests, typecheck and both real host
-  probes pass. Obtain green Docker E2E on the updated PR head before closing
-  this gate; host evidence alone does not resolve the clean-container concern.
+  probes pass. [Docker E2E on source commit `3b944e1`](https://github.com/Mesya82/opencode-mcp-orchestrator/actions/runs/34942391248)
+  and [CI](https://github.com/Mesya82/opencode-mcp-orchestrator/actions/runs/34942391174)
+  pass. The E2E log confirms required networkless preflight, installed Worker
+  and Runner probes, `DOCTOR_HEALTHY`, and restoration of the runner's exact
+  original AppArmor user-namespace setting (`1`). Both review concerns are
+  resolved; installed two-worktree live testing remains a separate follow-up.
 
 1. Continue live cancellation and installed-bundle regression coverage as the
    bridge lifecycle evolves.

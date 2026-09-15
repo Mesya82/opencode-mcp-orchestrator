@@ -454,8 +454,15 @@ typecheck, focused equivalence/Git/output tests and real provider-free Worker
 and Runner host probes all pass. Root also removed an unused draft helper.
 
 The prior partial-patch handoff above is historical, not the current source
-status. The remaining review gate is a green Docker clean-container run on the
-updated PR head. Keep this gate explicit; do not merge based only on host probes.
+status. [Docker clean-container E2E on `3b944e1`](https://github.com/Mesya82/opencode-mcp-orchestrator/actions/runs/34942391248)
+and [CI](https://github.com/Mesya82/opencode-mcp-orchestrator/actions/runs/34942391174)
+pass. The required networkless preflight and installed Worker/Runner probes
+all execute successfully with `DOCTOR_HEALTHY`. The log shows the disposable
+runner's AppArmor user-namespace setting changed from `1` to `0` for E2E and
+restored/verified as `1` afterwards. This confirms the CI-only policy remedy;
+the Docker launcher and production network isolation were not weakened.
+The review gate is resolved. Installed two-worktree live testing remains a
+separate follow-up, not evidence supplied by this provider-free E2E.
 
 ## Upstream audit finding with no available fix
 
