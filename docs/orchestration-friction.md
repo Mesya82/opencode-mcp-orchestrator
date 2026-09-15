@@ -212,6 +212,11 @@ focused and full local tests; installed two-worktree validation remains
 pending. Doctor probes pass focused/full local tests and real Bubblewrap
 execution. The broad container E2E was stopped after an external OpenCode
 download stalled; it did not reach the installed Doctor checks.
+The first GitHub Docker E2E then failed closed because Docker's default
+namespace/security profile denied nested Bubblewrap. The disposable Docker
+test harness now enables the required capability and unconfined
+seccomp/AppArmor profiles; runtime probes still use `--unshare-net` and are
+never skipped.
 Incidents 2 and 3 shared the same plugin-init worktree-capture defect but have
 distinct effects and regression assertions.
 

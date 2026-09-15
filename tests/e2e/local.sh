@@ -74,8 +74,12 @@ if test "$RUNTIME" = "podman"; then
     --volume "$ROOT/release:/release:ro,Z" \
     "$IMAGE"
 else
+  # Disposable E2E container needs nested namespaces for bwrap/Doctor probes.
   "$RUNTIME" run \
     --rm \
+    --cap-add=SYS_ADMIN \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined \
     --volume "$ROOT/release:/release:ro" \
     "$IMAGE"
 fi
