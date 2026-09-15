@@ -213,10 +213,15 @@ pending. Doctor probes pass focused/full local tests and real Bubblewrap
 execution. The broad container E2E was stopped after an external OpenCode
 download stalled; it did not reach the installed Doctor checks.
 The first GitHub Docker E2E then failed closed because Docker's default
-namespace/security profile denied nested Bubblewrap. The disposable Docker
-test harness now enables the required capability and unconfined
-seccomp/AppArmor profiles; runtime probes still use `--unshare-net` and are
-never skipped.
+namespace/security profile denied nested Bubblewrap. Disposable-container
+probes showed `--cap-add SYS_ADMIN` makes bwrap fail with `Unexpected
+capabilities but not setuid`, while no capability with default masked system
+paths fails on the proc mount. The Podman launcher passes with
+`--security-opt seccomp=unconfined --security-opt systempaths=unconfined
+--security-opt label=disable` and no capability or privileged flag; the
+Docker launcher drops `--cap-add SYS_ADMIN`, retains unconfined
+seccomp/AppArmor, and adds `systempaths=unconfined`, pending CI. Runtime
+probes still use `--unshare-net` and are never skipped.
 Incidents 2 and 3 shared the same plugin-init worktree-capture defect but have
 distinct effects and regression assertions.
 

@@ -71,15 +71,18 @@ echo "=== RUN E2E ==="
 if test "$RUNTIME" = "podman"; then
   "$RUNTIME" run \
     --rm \
+    --security-opt seccomp=unconfined \
+    --security-opt systempaths=unconfined \
+    --security-opt label=disable \
     --volume "$ROOT/release:/release:ro,Z" \
     "$IMAGE"
 else
   # Disposable E2E container needs nested namespaces for bwrap/Doctor probes.
   "$RUNTIME" run \
     --rm \
-    --cap-add=SYS_ADMIN \
     --security-opt seccomp=unconfined \
     --security-opt apparmor=unconfined \
+    --security-opt systempaths=unconfined \
     --volume "$ROOT/release:/release:ro" \
     "$IMAGE"
 fi
