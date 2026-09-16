@@ -311,6 +311,53 @@ test("symlink-backed CA file mounts canonically without lexical symlink bind", (
   assert.ok(debian.some((m) => m.target === CA_FILE))
 })
 
+test("symlink-backed /etc/ssl/cert.pem mounts canonical source onto lexical path", () => {
+  const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
+  const lexical = "/etc/ssl/cert.pem"
+  const canonical = "/usr/share/ca-certificates/mozilla/DST_Root_CA_X3.crt"
+  const fs = fakeNetworkFs({
+    files: new Set(["/etc/resolv.conf", lexical]),
+    dirs: new Set(["/etc/ssl/certs"]),
+    realpath: (path) => path === lexical ? canonical : path,
+  })
+
+  const mounts = resolveSandboxNetworkMounts(fs)
+  // Canonical regular-file source bound directly onto the lexical path.
+  assert.ok(mounts.some((mount) => mount.source === canonical && mount.target === lexical))
+  // No bind sourced from the lexical symlink and no lexical->lexical bind.
+  assert.ok(!mounts.some((mount) => mount.source === lexical))
+  assert.ok(!mounts.some((mount) => mount.source === "/etc/ssl" || mount.target === "/etc/ssl"))
+  // No private-root or HOME-adjacent target.
+  for (const mount of mounts) {
+    assert.ok(!mount.target.startsWith("/etc/ssl/private"))
+    assert.ok(!mount.target.startsWith("/home/"))
+  }
+
+  const argv = buildBaseSandboxArgv(wt, "/workspace", {
+    networkAccess: "host",
+    ...fs,
+  })
+  assert.equal(mountFlag(argv, canonical, lexical), "--ro-bind")
+  assert.equal(mountFlag(argv, lexical, lexical), undefined)
+  assert.equal(mountFlag(argv, canonical, canonical), undefined)
+  assert.equal(mountFlag(argv, "/etc/ssl", "/etc/ssl"), undefined)
+  assert.equal(mountFlag(argv, "/etc/ssl/private", "/etc/ssl/private"), undefined)
+})
+
+test("symlink-backed CA file with forbidden lexical source fails closed", () => {
+  const lexical = "/etc/ssl/cert.pem"
+  assert.throws(
+    () => resolveSandboxNetworkMounts(
+      fakeNetworkFs({
+        files: new Set(["/etc/resolv.conf", lexical]),
+        dirs: new Set(),
+        realpath: (p) => p === lexical ? "/home/tester/evil-ca.crt" : p,
+      }),
+    ),
+    /CA trust source/,
+  )
+})
+
 test("no proxy or host env leaks into argv", () => {
   const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
   process.env.HTTP_PROXY = "http://proxy.example:8080"

@@ -947,6 +947,7 @@ export function resolveSandboxNetworkMounts(options = {}) {
   }
 
   let caFound = false
+  const emittedCaDirs = new Set()
   const considerCa = (source, kind) => {
     let present = false
     try {
@@ -977,17 +978,29 @@ export function resolveSandboxNetworkMounts(options = {}) {
     if (!isAllowedCaCanonical(canonical)) return
     if (isForbiddenNetworkTarget(canonical, canonicalHome)) return
     if (kind === "file" && canonical !== source) {
-      // Symlink-backed CA file (notably Fedora/RHEL's
-      // /etc/pki/tls/certs/ca-bundle.crt): never bind onto the lexical
-      // symlink destination -- Bubblewrap 0.12.0 rejects that. Keep the
-      // validated symlink-bearing parent directory at its lexical
+      // Symlink-backed CA file. When the lexical parent directory is itself
+      // an approved CA directory that was actually mounted (notably
+      // Fedora/RHEL's /etc/pki/tls/certs/ca-bundle.crt), never bind onto
+      // the lexical symlink destination -- Bubblewrap 0.12.0 rejects that.
+      // Keep the validated symlink-bearing parent directory at its lexical
       // destination and bind the validated canonical regular file at its
       // canonical destination so the preserved symlink resolves.
-      pushMount(canonical, canonical)
+      // Otherwise (notably /etc/ssl/cert.pem whose lexical parent /etc/ssl
+      // is intentionally synthetic/not directory-bound), the lexical path
+      // would otherwise stay absent: bind the validated canonical regular
+      // file directly onto the exact lexical candidate path. Never source
+      // from the lexical symlink and never broadly bind the parent.
+      if (isForbiddenNetworkTarget(source, canonicalHome)) return
+      if (emittedCaDirs.has(dirname(source))) {
+        pushMount(canonical, canonical)
+      } else {
+        pushMount(canonical, source)
+      }
       caFound = true
       return
     }
     pushMount(source)
+    if (kind === "dir") emittedCaDirs.add(source)
     caFound = true
   }
 

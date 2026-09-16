@@ -590,6 +590,78 @@ async function runCaSymlinkLayoutRegression(hostArgv, disabledArgv) {
 }
 
 /* ------------------------------------------------------------------ */
+/* /etc/ssl/cert.pem symlink-layout regression (real bwrap 0.12.0)     */
+/* ------------------------------------------------------------------ */
+
+async function runSslCertPemRegression(hostArgv, disabledArgv, { httpsPort }) {
+  const lexical = "/etc/ssl/cert.pem"
+  const canonical = realpathSync(lexical)
+  if (canonical === lexical) {
+    throw new Error(`${lexical} is not symlink-backed in this fixture`)
+  }
+  if (!hasBind(hostArgv, canonical, lexical)) {
+    throw new Error(
+      `production argv omitted the canonical->lexical CA bind for ${lexical} (source ${canonical})`,
+    )
+  }
+  if (hasBind(hostArgv, lexical, lexical)) {
+    throw new Error("production argv binds onto the lexical CA symlink source")
+  }
+  for (const [source, target] of [
+    ["/etc/ssl", "/etc/ssl"],
+    ["/etc/ssl/private", "/etc/ssl/private"],
+  ]) {
+    if (hasBind(hostArgv, source, target)) {
+      throw new Error(`production argv unexpectedly broad-binds ${source}`)
+    }
+  }
+  if (hasBind(disabledArgv, canonical, lexical)) {
+    throw new Error("disabled production argv unexpectedly binds the CA trust file")
+  }
+  console.log("CA_SSL_CERT_PEM_BIND_SHAPE_OK")
+
+  const expected = readFileSync(canonical, "utf8")
+  const probe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/bin/cat", lexical,
+  ])
+  if (probe.code !== 0 || probe.stdout !== expected) {
+    throw new Error(
+      "/etc/ssl/cert.pem did not resolve through production argv " +
+        "inside real Bubblewrap 0.12.0 " +
+        `(exit=${probe.code} timedOut=${probe.timedOut} ` +
+        `stdout=${JSON.stringify(probe.stdout.slice(0, 200))} ` +
+        `stderr=${probe.stderr.trim().slice(0, 500)}).`,
+    )
+  }
+  console.log("CA_SSL_CERT_PEM_READ_OK")
+
+  const tlsProbe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/usr/bin/curl",
+    "--connect-timeout",
+    String(CONNECT_TIMEOUT_S),
+    "--max-time",
+    String(CURL_MAX_TIME_S),
+    "-fsS",
+    "--cacert",
+    lexical,
+    "--resolve",
+    `${TEST_HOSTNAME}:${httpsPort}:127.0.0.1`,
+    `https://${TEST_HOSTNAME}:${httpsPort}/marker`,
+  ])
+  if (tlsProbe.code !== 0 || tlsProbe.stdout.trim() !== TLS_MARKER) {
+    throw new Error(
+      "explicit TLS verification through /etc/ssl/cert.pem did not succeed " +
+        `(exit=${tlsProbe.code} timedOut=${tlsProbe.timedOut} ` +
+        `stdout=${JSON.stringify(tlsProbe.stdout.trim().slice(0, 200))} ` +
+        `stderr=${tlsProbe.stderr.trim().slice(0, 800)}).`,
+    )
+  }
+  console.log("TLS_CACERT_SSL_CERT_PEM_OK")
+}
+
+/* ------------------------------------------------------------------ */
 /* Full E2E                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -853,6 +925,11 @@ async function runFullE2e() {
 
     checkDeadline("Fedora/RHEL CA symlink layout inside real bwrap")
     await runCaSymlinkLayoutRegression(hostArgv, disabledArgv)
+
+    checkDeadline("/etc/ssl/cert.pem CA layout inside real bwrap")
+    await runSslCertPemRegression(hostArgv, disabledArgv, {
+      httpsPort: httpsEndpoint.port,
+    })
 
     console.log("RUNNER_NETWORK_ACCESS_E2E_OK")
   } finally {

@@ -62,6 +62,15 @@ RUN mkdir -p /etc/pki/tls/certs /etc/pki/ca-trust/extracted/pem \
   && test "$(readlink -f /etc/pki/tls/certs/ca-bundle.crt)" \
     = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
 
+# Exercise the synthetic-parent symlink shape: /etc/ssl/cert.pem is a
+# symlink to an allowed canonical trust file while /etc/ssl itself is never
+# directory-bound, so production must bind the canonical file directly onto
+# the lexical path.
+RUN ln -sf certs/ca-certificates.crt /etc/ssl/cert.pem \
+  && test -L /etc/ssl/cert.pem \
+  && test "$(readlink -f /etc/ssl/cert.pem)" \
+    = /etc/ssl/certs/ca-certificates.crt
+
 RUN useradd \
   --create-home \
   --shell /bin/bash \
