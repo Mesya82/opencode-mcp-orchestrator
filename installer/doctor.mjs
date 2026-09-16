@@ -28,13 +28,22 @@ import {
 } from "../config/sandbox-runtime.mjs"
 
 import {
+  SANDBOX_PROBE_KINDS,
+  runSandboxProbe,
+} from "../config/sandbox-probes.mjs"
+
+import {
   codexConfigPath,
   readCodexMcpToolTimeout,
 } from "./codex-config.mjs"
 
 import {
+  bubblewrapFailureDetail,
+  checkBubblewrapVersion,
   commandExists,
+  isExecutableFile,
   isProbeTimeoutResult,
+  LAUNCHER_PREREQUISITE_PATHS,
   probeTimeoutMessage,
   SUBPROCESS_PROBE_TIMEOUT_MS,
 } from "./path-security.mjs"
@@ -42,6 +51,7 @@ import {
 function parseArgs(argv) {
   const result = {
     config: null,
+    sandboxProbes: true,
   }
 
   for (let i = 0; i < argv.length; i++) {
@@ -52,10 +62,15 @@ function parseArgs(argv) {
       continue
     }
 
+    if (arg === "--no-sandbox-probes") {
+      result.sandboxProbes = false
+      continue
+    }
+
     if (arg === "--help" || arg === "-h") {
       console.log(`
 Usage:
-  doctor.mjs [--config PATH]
+  doctor.mjs [--config PATH] [--no-sandbox-probes]
 `)
       process.exit(0)
     }
@@ -148,16 +163,38 @@ if (process.platform === "linux") {
   fail(`Linux required; detected ${process.platform}`)
 }
 
-if (commandExists("bwrap")) {
-  ok("bubblewrap")
-} else {
-  fail("bubblewrap not found")
+console.log()
+console.log("Launcher prerequisites")
+
+for (const exact of LAUNCHER_PREREQUISITE_PATHS) {
+  if (exact === "/usr/bin/bwrap") {
+    continue
+  }
+
+  if (isExecutableFile(exact)) {
+    ok(`${exact} (exact launcher path)`)
+  } else {
+    fail(`${exact} missing or not executable (exact launcher path required)`)
+  }
 }
 
-if (commandExists("git")) {
-  ok("Git")
-} else {
-  fail("Git not found")
+{
+  if (!isExecutableFile("/usr/bin/bwrap")) {
+    if (commandExists("bwrap")) {
+      fail("/usr/bin/bwrap missing or not executable (exact production path required)")
+    } else {
+      fail("bubblewrap not found")
+    }
+  } else {
+    const bwrapStatus =
+      checkBubblewrapVersion(spawnSync)
+
+    if (bwrapStatus.ok) {
+      ok(`/usr/bin/bwrap ${bwrapStatus.version.text} (exact production path)`)
+    } else {
+      fail(`Bubblewrap: ${bubblewrapFailureDetail(bwrapStatus)}`)
+    }
+  }
 }
 
 if (
@@ -469,9 +506,32 @@ for (
 }
 
 console.log()
+console.log("Sandbox probes")
+
+if (!args.sandboxProbes) {
+  console.log("  - sandbox probes skipped; readiness unverified")
+} else {
+  const probeRuntime = sandboxRuntime ?? { trustedRoots: [] }
+
+  for (const kind of SANDBOX_PROBE_KINDS) {
+    const result = runSandboxProbe(kind, { sandboxRuntime: probeRuntime })
+
+    if (result.ok) {
+      ok(`${kind} sandbox probe`)
+    } else {
+      fail(`${kind} sandbox probe: ${result.detail || `${kind} probe failed`}`)
+    }
+  }
+}
+
+console.log()
 
 if (failures === 0) {
-  console.log("DOCTOR_HEALTHY")
+  if (args.sandboxProbes) {
+    console.log("DOCTOR_HEALTHY")
+  } else {
+    console.log("DOCTOR_READINESS_UNVERIFIED")
+  }
   process.exit(0)
 }
 
