@@ -879,10 +879,13 @@ function isNativeCaTrustDirCanonical(canonical) {
 
 /*
  * Resolve the narrow read-only network-support mounts for host mode.
- * Returns [{ source, target }] with target === source. Symlink-backed
- * sources are resolved via realpath and validated for safe location and
- * file type. A usable resolver configuration and at least one usable CA
- * trust source (file or directory) are both required; host mode fails
+ * Returns narrow [{ source, target }] read-only mounts. Most mounts preserve
+ * the host path (target === source); a symlink-backed CA candidate whose
+ * lexical parent is not mounted instead uses its validated canonical file as
+ * source and the lexical candidate as target. Candidates are resolved via
+ * realpath and validated for safe location and file type. A usable resolver
+ * configuration and at least one usable CA trust source (file or directory)
+ * are both required; host mode fails
  * closed when either capability is unavailable. /etc/hosts remains
  * optional because ordinary DNS does not depend on it.
  */
