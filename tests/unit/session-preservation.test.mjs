@@ -366,6 +366,61 @@ test("late session creation after timeout is interrupted and preserved", async (
   resetBridgeStateForTests()
 })
 
+test("preserved scout via env flag retains session without blocking writable delegation", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-preserve-scout-env-", async (dir) => {
+    const { calls, client } = makeFakeClient()
+    const events = []
+    const baseOptions = {
+      client,
+      model: stubModel,
+      timeoutMs: 5000,
+      parentTimeoutSeconds: 7200,
+      diagnosticLog: (event) => events.push(event),
+      env: { [PRESERVE_SESSIONS_ENV_VAR]: "1" },
+    }
+
+    assert.equal(
+      await runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-scout",
+        "scout",
+        baseOptions,
+      ),
+      "hello",
+    )
+
+    assert.equal(count(calls, "interrupt"), 0)
+    assert.equal(count(calls, "remove"), 0)
+    assert.deepEqual(events, [{
+      event: "session_preserved",
+      session_id: "ses_preserved",
+      succeeded: true,
+      role: "scout",
+      agent: "opencode-orchestrator-scout",
+      cwd: dir,
+    }])
+
+    assert.equal(
+      await runAgent(
+        dir,
+        "second task",
+        "opencode-orchestrator-worker",
+        "worker",
+        baseOptions,
+      ),
+      "hello",
+    )
+
+    assert.equal(count(calls, "create"), 2)
+    assert.equal(count(calls, "remove"), 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("diagnostic cleanup is bounded when interruption does not settle", async () => {
   resetBridgeStateForTests()
 

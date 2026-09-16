@@ -243,9 +243,15 @@ Scout and read-only runner paths never consult writer state.
 
 Diagnostic preservation is a strict opt-in: only
 `OPENCODE_MCP_ORCHESTRATOR_PRESERVE_SESSIONS=1` enables it. When enabled,
-unsuccessful writable work is interrupted best-effort but never removed, a
-`session_preserved` event records the session ID and outcome, and the
-directory stays blocked in `preserved` state. A timeout before
+every delegated session (Scout, Worker, and Runner in either access mode)
+is retained instead of removed, and a `session_preserved` event records the
+session ID and outcome. Successful sessions are retained without
+interruption; unsuccessful sessions are interrupted best-effort before
+retention. Only Worker and writable Runner transition the worktree to the
+`preserved` state: the directory stays blocked for subsequent writable
+delegation. Retained Scout and read-only Runner sessions never touch
+writer state, so they neither block nor poison later writable work.
+A writable timeout before
 `session.create()` resolves still blocks the directory; once creation
 resolves late, reconciliation attaches the session ID, interrupts exactly
 once, never removes the session, and emits `session_preserved` with

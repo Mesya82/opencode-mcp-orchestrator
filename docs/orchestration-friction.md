@@ -87,12 +87,18 @@ read-only Runner calls do not consult writer state.
 
 Diagnostic preservation is a strict opt-in: only
 `OPENCODE_MCP_ORCHESTRATOR_PRESERVE_SESSIONS=1` enables it. When enabled,
-the terminal state above is `preserved` instead of `quarantined`: the
-session is interrupted best-effort after unsuccessful work but never
-removed, a `session_preserved` event records the session ID and outcome,
-and the worktree stays blocked. A timeout before `session.create()`
-resolves still blocks the directory; once creation resolves late,
-reconciliation attaches the session ID, interrupts exactly once, never
+every delegated session (Scout, Worker, and Runner in either access mode)
+is retained instead of removed: a `session_preserved` event records the
+session ID and outcome. Successful sessions are retained without
+interruption; the session is interrupted best-effort only after
+unsuccessful work, never removed. Only Worker and writable Runner
+transition the worktree to the terminal `preserved` state above, which
+stays blocked for later writable delegation. Retained Scout and
+read-only Runner sessions never consult or update writer state, so they
+neither block nor poison subsequent writable delegation. A writable timeout
+before `session.create()` resolves still blocks the directory; once creation
+resolves late, reconciliation attaches the session ID, interrupts exactly
+once, never
 removes the session, and emits `session_preserved` with
 `succeeded:false`. Recovery is to verify the preserved session is no
 longer executing, inspect the workspace and inspect/export the preserved
