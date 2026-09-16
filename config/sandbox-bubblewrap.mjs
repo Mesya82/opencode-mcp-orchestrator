@@ -29,6 +29,7 @@ import {
   realpathSync as fsRealpathSync,
   statSync as fsStatSync,
 } from "node:fs"
+import { isIP } from "node:net"
 
 import {
   delimiter as pathDelimiter,
@@ -805,6 +806,8 @@ function isForbiddenNetworkTarget(canonical, home) {
     canonical === "/etc" ||
     canonical === "/etc/ssl" ||
     canonical === "/etc/ssl/private" ||
+    canonical === "/etc/pki/private" ||
+    canonical === "/etc/pki/tls/private" ||
     canonical === "/" ||
     canonical === "/home" ||
     canonical === "/tmp"
@@ -812,6 +815,8 @@ function isForbiddenNetworkTarget(canonical, home) {
     return true
   }
   if (isWithin("/etc/ssl/private", canonical)) return true
+  if (isWithin("/etc/pki/private", canonical)) return true
+  if (isWithin("/etc/pki/tls/private", canonical)) return true
   if (SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT.has(canonical)) return true
   if (!home) return false
   if (canonical === home || isWithin(home, canonical)) return true
@@ -832,10 +837,18 @@ function isAllowedResolverCanonical(source, canonical) {
 }
 
 function isAllowedCaCanonical(canonical) {
-  if (isWithin("/etc/ssl/private", canonical)) return false
+  if (
+    isWithin("/etc/ssl/private", canonical) ||
+    isWithin("/etc/pki/private", canonical) ||
+    isWithin("/etc/pki/tls/private", canonical)
+  ) {
+    return false
+  }
   return (
-    isWithin("/etc/ssl", canonical) ||
-    isWithin("/etc/pki", canonical) ||
+    canonical === "/etc/ssl/cert.pem" ||
+    isWithin("/etc/ssl/certs", canonical) ||
+    isWithin("/etc/pki/tls/certs", canonical) ||
+    isWithin("/etc/pki/ca-trust/extracted", canonical) ||
     isWithin("/usr/share/ca-certificates", canonical)
   )
 }
@@ -844,12 +857,14 @@ function isAllowedCaCanonical(canonical) {
  * Resolve the narrow read-only network-support mounts for host mode.
  * Returns [{ source, target }] with target === source. Symlink-backed
  * sources are resolved via realpath and validated for safe location and
- * file type. Resolver files are best-effort (skipped when absent);
- * at least one usable CA trust source (file or directory) is required
- * and throws fail-closed when none is available.
+ * file type. A usable resolver configuration and at least one usable CA
+ * trust source (file or directory) are both required; host mode fails
+ * closed when either capability is unavailable. /etc/hosts remains
+ * optional because ordinary DNS does not depend on it.
  */
 export function resolveSandboxNetworkMounts(options = {}) {
   const existsFn = options.existsSync ?? fsExistsSync
+  const readFileFn = options.readFileSync ?? fsReadFileSync
   const realpathFn = options.realpathSync ?? fsRealpathSync
   const statFn = options.statSync ?? fsStatSync
   const env = options.env ?? process.env
@@ -862,6 +877,7 @@ export function resolveSandboxNetworkMounts(options = {}) {
   }
   const mounts = []
   const seen = new Set()
+  let resolverFound = false
 
   const pushMount = (source) => {
     if (seen.has(source)) return
@@ -899,7 +915,35 @@ export function resolveSandboxNetworkMounts(options = {}) {
       // --ro-bind follows the host path, so both must be safe.
       if (isForbiddenNetworkTarget(source, canonicalHome)) continue
     }
+    if (source === "/etc/resolv.conf") {
+      let contents
+      try {
+        contents = readFileFn(source, "utf8")
+      } catch {
+        continue
+      }
+      if (
+        typeof contents !== "string" ||
+        contents.length > 64 * 1024 ||
+        contents.includes("\0")
+      ) {
+        continue
+      }
+      const hasNameserver = contents.split("\n").some((line) => {
+        const directive = line.replace(/[#;].*$/, "").trim().split(/\s+/)
+        if (directive[0] !== "nameserver" || directive.length !== 2) {
+          return false
+        }
+        return isIP(directive[1].split("%", 1)[0]) !== 0
+      })
+      if (!hasNameserver) continue
+    }
     pushMount(source)
+    if (source === "/etc/resolv.conf") resolverFound = true
+  }
+
+  if (!resolverFound) {
+    throw new Error("no usable resolver configuration for host networking")
   }
 
   let caFound = false

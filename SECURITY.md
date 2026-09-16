@@ -61,7 +61,8 @@ The intended delegated-command properties are:
 - host mode adds only enumerated read-only `/etc/resolv.conf`,
   `/etc/hosts`, and CA trust source mounts; host HOME/credentials stay
   inaccessible, `--clearenv` remains in effect, and proxy variables are not
-  inherited
+  inherited; host-mode construction fails closed without both a validated
+  resolver configuration and a CA trust source
 - large command output is persisted and analyzed inside the delegated flow
   rather than copied wholesale into the parent context
 - persisted Runner logs may contain command output; see

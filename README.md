@@ -450,8 +450,10 @@ exfiltrate sandbox-visible data. Read-only mode prevents workspace writes
 but does not prevent exfiltration. Host mode adds only enumerated
 read-only mounts for `/etc/resolv.conf`, `/etc/hosts`, and a CA trust
 source; it does not expose host HOME or credentials, `--clearenv` remains
-in effect, and proxy variables are not inherited. `sandbox_shell` and the
-Doctor probes remain networkless. The Runner tool schema is
+in effect, and proxy variables are not inherited. Host-mode construction
+fails closed unless both a validated resolver configuration and a CA trust
+source are available. `sandbox_shell` and the Doctor probes remain
+networkless. The Runner tool schema is
 `cwd`, `command`, `objective`, plus existing optional `expected`,
 `timeout_seconds`, `workspace_access`, and `network_access`. Details and log
 retention are in docs/orchestration-friction.md.

@@ -58,6 +58,10 @@ function fakeNetworkFs({
 } = {}) {
   return {
     existsSync: (p) => files.has(p) || dirs.has(p),
+    readFileSync: (p) => {
+      if (p === "/etc/resolv.conf") return "nameserver 127.0.0.53\n"
+      throw new Error("unexpected read")
+    },
     realpathSync: realpath,
     statSync: (p) => {
       if (files.has(p) || (!dirs.has(p) && p.endsWith(".crt")) || p.endsWith(".pem")) {
@@ -88,7 +92,7 @@ test("omitted networkAccess stays byte-for-byte networkless", () => {
 })
 
 test("invalid networkAccess throws before spawning", () => {
-  for (const bad of ["HOST", "none", "", "host ", true, 1, {}]) {
+  for (const bad of [null, "HOST", "none", "", "host ", true, 1, {}]) {
     assert.throws(() => normalizeSandboxNetworkAccess(bad), /invalid networkAccess/)
     assert.throws(() => sandboxIsolationArgv({ networkAccess: bad }), /invalid networkAccess/)
     const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
@@ -142,30 +146,58 @@ test("disabled base argv is networkless; host adds narrow mounts only", () => {
   assert.ok(![...env.values()].join("\n").match(/proxy/i))
 })
 
-test("symlink-backed resolver outside allowlist is skipped; CA required", () => {
-  // resolv.conf symlinked to HOME is unsafe -> skipped, but CA still mounts.
-  const mounts = resolveSandboxNetworkMounts(
-    fakeNetworkFs({
-      files: new Set(["/etc/resolv.conf", CA_FILE]),
-      dirs: new Set(),
-      realpath: (p) =>
-        p === "/etc/resolv.conf" ? "/home/tester/evil-resolv" : p,
-    }),
+test("host networking requires a validated resolver configuration", () => {
+  assert.throws(
+    () => resolveSandboxNetworkMounts(
+      fakeNetworkFs({ files: new Set([CA_FILE]), dirs: new Set() }),
+    ),
+    /resolver configuration/,
   )
-  assert.ok(!mounts.some((m) => m.source === "/etc/resolv.conf"))
-  assert.ok(mounts.some((m) => m.source === CA_FILE))
+
+  for (const badContents of [
+    "",
+    "search example.test\n",
+    "nameserver not-an-address\n",
+  ]) {
+    assert.throws(
+      () => resolveSandboxNetworkMounts({
+        ...hostFs(),
+        readFileSync: () => badContents,
+      }),
+      /resolver configuration/,
+    )
+  }
+
+  assert.throws(
+    () => resolveSandboxNetworkMounts({
+      ...hostFs(),
+      readFileSync: () => { throw new Error("unreadable") },
+    }),
+    /resolver configuration/,
+  )
+
+  assert.throws(
+    () => resolveSandboxNetworkMounts(
+      fakeNetworkFs({
+        files: new Set(["/etc/resolv.conf", CA_FILE]),
+        dirs: new Set(),
+        realpath: (p) =>
+          p === "/etc/resolv.conf" ? "/home/tester/evil-resolv" : p,
+      }),
+    ),
+    /resolver configuration/,
+  )
 
   for (const unsafeTarget of ["/etc/shadow", "/run/secrets/resolver-token"]) {
-    const unsafeMounts = resolveSandboxNetworkMounts(
-      fakeNetworkFs({
-        files: new Set(["/etc/resolv.conf", unsafeTarget, CA_FILE]),
-        dirs: new Set(),
-        realpath: (p) => p === "/etc/resolv.conf" ? unsafeTarget : p,
-      }),
-    )
-    assert.ok(
-      !unsafeMounts.some((m) => m.source === "/etc/resolv.conf"),
-      unsafeTarget,
+    assert.throws(
+      () => resolveSandboxNetworkMounts(
+        fakeNetworkFs({
+          files: new Set(["/etc/resolv.conf", unsafeTarget, CA_FILE]),
+          dirs: new Set(),
+          realpath: (p) => p === "/etc/resolv.conf" ? unsafeTarget : p,
+        }),
+      ),
+      /resolver configuration/,
     )
   }
 
@@ -184,7 +216,7 @@ test("symlink-backed resolver outside allowlist is skipped; CA required", () => 
   )
   assert.ok(systemdMounts.some((m) => m.source === "/etc/resolv.conf"))
 
-  // No CA at all fails closed.
+  // No CA at all fails closed after resolver validation.
   assert.throws(
     () =>
       resolveSandboxNetworkMounts(
@@ -193,18 +225,26 @@ test("symlink-backed resolver outside allowlist is skipped; CA required", () => 
     /CA trust source/,
   )
 
-  // CA resolving into private dir is rejected -> fail closed.
-  assert.throws(
-    () =>
-      resolveSandboxNetworkMounts(
+})
+
+test("CA candidates canonicalized into private-key roots are rejected", () => {
+  for (const privateTarget of [
+    "/etc/ssl/private/evil.crt",
+    "/etc/pki/private/evil.crt",
+    "/etc/pki/tls/private/evil.crt",
+  ]) {
+    assert.throws(
+      () => resolveSandboxNetworkMounts(
         fakeNetworkFs({
-          files: new Set([CA_FILE]),
+          files: new Set(["/etc/resolv.conf", CA_FILE, privateTarget]),
           dirs: new Set(),
-          realpath: () => "/etc/ssl/private/evil.crt",
+          realpath: (p) => p === CA_FILE ? privateTarget : p,
         }),
       ),
-    /CA trust source/,
-  )
+      /CA trust source/,
+      privateTarget,
+    )
+  }
 })
 
 test("no proxy or host env leaks into argv", () => {

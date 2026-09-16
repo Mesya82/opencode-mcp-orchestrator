@@ -113,6 +113,10 @@ COPY --chown=tester:tester \
   /e2e/network-access.mjs
 
 COPY --chown=tester:tester \
+  tests/e2e/network-run.sh \
+  /e2e/network-run.sh
+
+COPY --chown=tester:tester \
   tests/unit/linked-git-worktree.test.mjs \
   /e2e/tests/unit/linked-git-worktree.test.mjs
 

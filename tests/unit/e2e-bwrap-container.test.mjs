@@ -82,8 +82,9 @@ test("e2e Containerfile builds deterministic TLS trust for the dedicated hostnam
   assert.match(src, /\/e2e\/network-access\.mjs/)
 })
 
-test("e2e run.sh proves the real-bwrap network boundary without skips", () => {
-  const src = read("tests/e2e/run.sh")
+test("dedicated e2e container proves the real-bwrap network boundary without skips", () => {
+  const src = read("tests/e2e/network-run.sh")
+  const launcher = read("tests/e2e/local.sh")
   assert.match(src, /\/e2e\/network-access\.mjs/)
   assert.match(src, /RUNNER_NETWORK_ACCESS_E2E_OK/)
   assert.match(src, /RUNNER_NETWORK_ACCESS_E2E_STAGE_OK/)
@@ -92,6 +93,8 @@ test("e2e run.sh proves the real-bwrap network boundary without skips", () => {
   assert.match(src, /DNS_RESOLVER_HOST_OK/)
   assert.match(src, /TLS_VERIFIED_HOST_OK/)
   assert.match(src, /test "\$NETWORK_STATUS" -eq 0/)
+  assert.match(launcher, /--dns 127\.0\.0\.1/)
+  assert.match(launcher, /\/e2e\/network-run\.sh/)
   assert.doesNotMatch(src, /--privileged/)
   assert.doesNotMatch(src, /--cap-add/)
 })
@@ -108,6 +111,7 @@ test("network-access harness uses production argv and strict boundaries", () => 
   assert.match(src, /RESOLVER_CONFIG_MOUNT_OK/)
   assert.match(src, /127\.0\.0\.1/)
   assert.match(src, /resolve4/)
+  assert.match(src, /mounted \/etc\/resolv\.conf/)
   assert.match(src, /--resolve/)
   assert.match(src, /--unshare-net/)
   assert.match(src, /Failing, never skipping/)

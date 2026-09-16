@@ -30,7 +30,7 @@ export const SANDBOX_NETWORK_ACCESS_MODES = Object.freeze([
  * Anything else fails closed before spawning.
  */
 export function normalizeSandboxNetworkAccess(value) {
-  if (value === undefined || value === null) return "disabled"
+  if (value === undefined) return "disabled"
   if (value === "disabled" || value === "host") return value
   throw new Error("invalid networkAccess")
 }

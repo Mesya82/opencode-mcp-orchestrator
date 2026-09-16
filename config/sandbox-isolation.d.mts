@@ -9,7 +9,7 @@ export function normalizeSandboxNetworkAccess(
 ): SandboxNetworkAccess
 
 export function sandboxIsolationArgv(options?: {
-  readonly networkAccess?: SandboxNetworkAccess | null | undefined
+  readonly networkAccess?: SandboxNetworkAccess | undefined
 }): string[]
 
 export function hasNetworklessIsolation(

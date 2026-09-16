@@ -14,6 +14,7 @@ export type SandboxNetworkAccess = "disabled" | "host"
 
 export function resolveSandboxNetworkMounts(options?: {
   readonly existsSync?: (path: string) => boolean
+  readonly readFileSync?: (path: string, encoding: "utf8") => string
   readonly realpathSync?: (path: string) => string
   readonly statSync?: (path: string) => {
     isDirectory(): boolean

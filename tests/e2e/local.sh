@@ -71,6 +71,17 @@ echo "=== RUN E2E ==="
 if test "$RUNTIME" = "podman"; then
   "$RUNTIME" run \
     --rm \
+    --dns 127.0.0.1 \
+    --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+    --security-opt seccomp=unconfined \
+    --security-opt systempaths=unconfined \
+    --security-opt label=disable \
+    --entrypoint /bin/bash \
+    "$IMAGE" \
+    /e2e/network-run.sh
+
+  "$RUNTIME" run \
+    --rm \
     --security-opt seccomp=unconfined \
     --security-opt systempaths=unconfined \
     --security-opt label=disable \
@@ -78,6 +89,17 @@ if test "$RUNTIME" = "podman"; then
     "$IMAGE"
 else
   # Disposable E2E container needs nested namespaces for bwrap/Doctor probes.
+  "$RUNTIME" run \
+    --rm \
+    --dns 127.0.0.1 \
+    --sysctl net.ipv4.ip_unprivileged_port_start=0 \
+    --security-opt seccomp=unconfined \
+    --security-opt apparmor=unconfined \
+    --security-opt systempaths=unconfined \
+    --entrypoint /bin/bash \
+    "$IMAGE" \
+    /e2e/network-run.sh
+
   "$RUNTIME" run \
     --rm \
     --security-opt seccomp=unconfined \

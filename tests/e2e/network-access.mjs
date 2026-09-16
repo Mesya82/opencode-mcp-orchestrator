@@ -370,7 +370,7 @@ async function startHttpsServer({ key, cert, marker }) {
   return { server, port: address.port }
 }
 
-async function startDnsServer(hostname) {
+async function startDnsServer(hostname, { port = 0 } = {}) {
   const wanted = normalizeDnsName(hostname)
   const socket = dgram.createSocket("udp4")
   const queries = []
@@ -407,7 +407,7 @@ async function startDnsServer(hostname) {
       reject(error)
     })
     socket.bind(
-      Number(process.env.E2E_NET_DNS_PORT ?? 0),
+      Number(process.env.E2E_NET_DNS_PORT ?? port),
       "127.0.0.1",
       () => {
         clearTimeout(timer)
@@ -422,26 +422,32 @@ async function startDnsServer(hostname) {
 /* In-sandbox DNS probe (ordinary c-ares resolver lookup)              */
 /* ------------------------------------------------------------------ */
 
-const DNS_PROBE_SOURCE = `import { Resolver } from "node:dns/promises"
+const DNS_PROBE_SOURCE = `import { resolve4 } from "node:dns/promises"
 const host = process.argv[2]
-const server = process.argv[3]
-if (!host || !server) {
-  console.error("usage: dns-probe.mjs <hostname> <server-ip:port>")
+if (!host) {
+  console.error("usage: dns-probe.mjs <hostname>")
   process.exit(2)
 }
-const resolver = new Resolver({ timeout: ${DNS_QUERY_TIMEOUT_MS}, tries: 1 })
-resolver.setServers([server])
 let addresses
 try {
-  addresses = await resolver.resolve4(host)
+  addresses = await resolve4(host, { ttl: false })
 } catch (error) {
-  console.error(\`DNS lookup failed for \${host} via \${server}: \${error.message}\`)
+  console.error(\`DNS lookup failed for \${host}: \${error.message}\`)
   process.exit(1)
 }
 if (addresses.length !== 1 || addresses[0] !== "127.0.0.1") {
   console.error(\`unexpected DNS answer for \${host}: \${JSON.stringify(addresses)}\`)
   process.exit(1)
 }
+console.log(\`DNS_RESOLVED \${host}=\${addresses[0]}\`)
+`
+
+const DNS_SELF_TEST_PROBE_SOURCE = `import { Resolver } from "node:dns/promises"
+const [host, server] = process.argv.slice(2)
+const resolver = new Resolver({ timeout: ${DNS_QUERY_TIMEOUT_MS}, tries: 1 })
+resolver.setServers([server])
+const addresses = await resolver.resolve4(host)
+if (addresses.length !== 1 || addresses[0] !== "127.0.0.1") process.exit(1)
 console.log(\`DNS_RESOLVED \${host}=\${addresses[0]}\`)
 `
 
@@ -599,7 +605,7 @@ async function runFullE2e() {
     const httpEndpoint = await startHttpServer(HTTP_MARKER)
     servers.push(httpEndpoint.server)
     console.log(`HTTP endpoint: 127.0.0.1:${httpEndpoint.port}`)
-    const dnsEndpoint = await startDnsServer(TEST_HOSTNAME)
+    const dnsEndpoint = await startDnsServer(TEST_HOSTNAME, { port: 53 })
     servers.push({
       close: (cb) => dnsEndpoint.socket.close(cb),
     })
@@ -710,6 +716,12 @@ async function runFullE2e() {
 
     checkDeadline("resolver config mount proof")
     const hostResolv = readFileSync("/etc/resolv.conf", "utf8")
+    if (!/^nameserver\s+127\.0\.0\.1\s*$/m.test(hostResolv)) {
+      throw new Error(
+        "deterministic network E2E requires /etc/resolv.conf to select " +
+          "the local DNS responder at 127.0.0.1",
+      )
+    }
     const sandboxResolv = await runCommand(hostArgv[0], [
       ...hostArgv.slice(1),
       "/usr/bin/cat",
@@ -729,13 +741,11 @@ async function runFullE2e() {
     console.log("RESOLVER_CONFIG_MOUNT_OK")
 
     checkDeadline("ordinary DNS lookup inside host sandbox")
-    const dnsServer = `127.0.0.1:${dnsEndpoint.port}`
     const dnsProbe = await runCommand(hostArgv[0], [
       ...hostArgv.slice(1),
       sandboxNode,
       "/workspace/dns-probe.mjs",
       TEST_HOSTNAME,
-      dnsServer,
     ])
     if (
       dnsProbe.code !== 0 ||
@@ -743,7 +753,7 @@ async function runFullE2e() {
     ) {
       throw new Error(
         `ordinary resolver lookup inside host mode did not resolve ` +
-          `${TEST_HOSTNAME} to 127.0.0.1 via local ${dnsServer} ` +
+          `${TEST_HOSTNAME} to 127.0.0.1 through mounted /etc/resolv.conf ` +
           `(exit=${dnsProbe.code} timedOut=${dnsProbe.timedOut} ` +
           `stdout=${dnsProbe.stdout.trim().slice(0, 300)} ` +
           `stderr=${dnsProbe.stderr.trim().slice(0, 500)}).`,
@@ -856,7 +866,7 @@ async function runSelfTest() {
     })
     servers.push(httpsEndpoint.server)
 
-    writeFileSync(join(scratch, "dns-probe.mjs"), DNS_PROBE_SOURCE)
+    writeFileSync(join(scratch, "dns-probe.mjs"), DNS_SELF_TEST_PROBE_SOURCE)
 
     const dnsLocal = await runCommand(process.execPath, [
       join(scratch, "dns-probe.mjs"),
