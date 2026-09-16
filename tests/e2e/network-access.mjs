@@ -548,6 +548,48 @@ function generateSelfTestPki(dir, hostname) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Fedora/RHEL CA symlink-layout regression (real bwrap 0.12.0)        */
+/* ------------------------------------------------------------------ */
+
+async function runCaSymlinkLayoutRegression(hostArgv, disabledArgv) {
+  const lexical = "/etc/pki/tls/certs/ca-bundle.crt"
+  const trustDir = "/etc/pki/tls/certs"
+  const canonical = "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+  if (realpathSync(lexical) !== canonical) {
+    throw new Error(`unexpected Fedora/RHEL CA fixture target for ${lexical}`)
+  }
+  if (!hasBind(hostArgv, trustDir, trustDir)) {
+    throw new Error("production argv omitted the Fedora/RHEL lexical CA directory bind")
+  }
+  if (!hasBind(hostArgv, canonical, canonical)) {
+    throw new Error("production argv omitted the canonical Fedora/RHEL trust-file bind")
+  }
+  if (hasBind(hostArgv, lexical, lexical)) {
+    throw new Error("production argv still binds onto the lexical CA symlink")
+  }
+  if (hasBind(disabledArgv, lexical, lexical)) {
+    throw new Error("disabled production argv unexpectedly binds the lexical CA symlink")
+  }
+  console.log("CA_SYMLINK_NO_LEXICAL_BIND_OK")
+
+  const expected = readFileSync(canonical, "utf8")
+  const probe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/bin/cat", lexical,
+  ])
+  if (probe.code !== 0 || probe.stdout !== expected) {
+    throw new Error(
+      "Fedora/RHEL CA symlink layout did not resolve through production argv " +
+        "inside real Bubblewrap 0.12.0 " +
+        `(exit=${probe.code} timedOut=${probe.timedOut} ` +
+        `stdout=${JSON.stringify(probe.stdout.slice(0, 200))} ` +
+        `stderr=${probe.stderr.trim().slice(0, 500)}).`,
+    )
+  }
+  console.log("CA_SYMLINK_LAYOUT_HOST_OK")
+}
+
+/* ------------------------------------------------------------------ */
 /* Full E2E                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -808,6 +850,9 @@ async function runFullE2e() {
       )
     }
     console.log("TLS_DISABLED_DENY_OK")
+
+    checkDeadline("Fedora/RHEL CA symlink layout inside real bwrap")
+    await runCaSymlinkLayoutRegression(hostArgv, disabledArgv)
 
     console.log("RUNNER_NETWORK_ACCESS_E2E_OK")
   } finally {

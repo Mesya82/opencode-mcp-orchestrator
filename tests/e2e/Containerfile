@@ -51,6 +51,17 @@ COPY --from=bwrap-build /bwrap-out/usr/bin/bwrap /usr/bin/bwrap
 RUN /usr/bin/bwrap --version \
   && test "$(/usr/bin/bwrap --version)" = "bubblewrap 0.12.0"
 
+# Exercise the Fedora/RHEL legacy trust layout through the production argv:
+# the lexical bundle is a symlink whose canonical target lives outside the
+# symlink-bearing directory.
+RUN mkdir -p /etc/pki/tls/certs /etc/pki/ca-trust/extracted/pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+  && ln -s /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+    /etc/pki/tls/certs/ca-bundle.crt \
+  && test "$(readlink -f /etc/pki/tls/certs/ca-bundle.crt)" \
+    = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
 RUN useradd \
   --create-home \
   --shell /bin/bash \

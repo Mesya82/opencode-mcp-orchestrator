@@ -879,10 +879,10 @@ export function resolveSandboxNetworkMounts(options = {}) {
   const seen = new Set()
   let resolverFound = false
 
-  const pushMount = (source) => {
-    if (seen.has(source)) return
-    seen.add(source)
-    mounts.push({ source, target: source })
+  const pushMount = (source, target = source) => {
+    if (seen.has(`${source}\0${target}`)) return
+    seen.add(`${source}\0${target}`)
+    mounts.push({ source, target })
   }
 
   for (const source of SANDBOX_NETWORK_RESOLVER_BINDS) {
@@ -976,13 +976,25 @@ export function resolveSandboxNetworkMounts(options = {}) {
     if (canonical === "/etc" || canonical === "/etc/ssl") return
     if (!isAllowedCaCanonical(canonical)) return
     if (isForbiddenNetworkTarget(canonical, canonicalHome)) return
+    if (kind === "file" && canonical !== source) {
+      // Symlink-backed CA file (notably Fedora/RHEL's
+      // /etc/pki/tls/certs/ca-bundle.crt): never bind onto the lexical
+      // symlink destination -- Bubblewrap 0.12.0 rejects that. Keep the
+      // validated symlink-bearing parent directory at its lexical
+      // destination and bind the validated canonical regular file at its
+      // canonical destination so the preserved symlink resolves.
+      pushMount(canonical, canonical)
+      caFound = true
+      return
+    }
     pushMount(source)
     caFound = true
   }
 
   // Bubblewrap processes mounts in command-line order. Bind directories
-  // before files so a later, validated file bind wins when its destination
-  // is nested below a CA directory (notably Fedora/RHEL's symlink-backed
+  // before files so the preserved lexical CA directory is already in
+  // place when the canonical trust file it links to is mounted
+  // (notably Fedora/RHEL's symlink-backed
   // /etc/pki/tls/certs/ca-bundle.crt layout).
   for (const source of SANDBOX_NETWORK_CA_DIR_CANDIDATES) {
     considerCa(source, "dir")

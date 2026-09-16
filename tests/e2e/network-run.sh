@@ -21,7 +21,9 @@ for marker in \
   LOOPBACK_HTTP_HOST_OK \
   LOOPBACK_HTTP_DISABLED_DENY_OK \
   DNS_RESOLVER_HOST_OK \
-  TLS_VERIFIED_HOST_OK
+  TLS_VERIFIED_HOST_OK \
+  CA_SYMLINK_NO_LEXICAL_BIND_OK \
+  CA_SYMLINK_LAYOUT_HOST_OK
 do
   grep -Fq "$marker" "$NETWORK_LOG" || {
     echo "ERROR: runner network access marker missing: $marker" >&2

@@ -272,7 +272,7 @@ test("CA candidates canonicalized into private-key roots are rejected", () => {
   }
 })
 
-test("specific CA files are mounted after overlapping CA directories", () => {
+test("symlink-backed CA file mounts canonically without lexical symlink bind", () => {
   const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
   const bundle = "/etc/pki/tls/certs/ca-bundle.crt"
   const trustDir = "/etc/pki/tls/certs"
@@ -288,19 +288,27 @@ test("specific CA files are mounted after overlapping CA directories", () => {
   })
 
   const mounts = resolveSandboxNetworkMounts(fs)
+  // Lexical parent directory remains mounted.
+  assert.ok(mounts.some((mount) => mount.source === trustDir && mount.target === trustDir))
+  // Canonical trust file is mounted narrowly at its canonical destination.
+  assert.ok(mounts.some((mount) => mount.source === canonicalBundle && mount.target === canonicalBundle))
+  // No bind targets the lexical symlink destination.
+  assert.ok(!mounts.some((mount) => mount.target === bundle))
   const dirIndex = mounts.findIndex((mount) => mount.target === trustDir)
-  const fileIndex = mounts.findIndex((mount) => mount.target === bundle)
-  assert.ok(dirIndex >= 0)
-  assert.ok(fileIndex > dirIndex)
+  const canonicalIndex = mounts.findIndex((mount) => mount.target === canonicalBundle)
+  assert.ok(dirIndex >= 0 && canonicalIndex >= 0)
 
   const argv = buildBaseSandboxArgv(wt, "/workspace", {
     networkAccess: "host",
     ...fs,
   })
-  assert.ok(
-    mountIndex(argv, bundle, bundle) > mountIndex(argv, trustDir, trustDir),
-    "validated Fedora/RHEL bundle bind must win after its parent directory",
-  )
+  assert.equal(mountIndex(argv, bundle, bundle), -1)
+  assert.ok(mountIndex(argv, trustDir, trustDir) >= 0)
+  assert.ok(mountIndex(argv, canonicalBundle, canonicalBundle) >= 0)
+  assert.equal(mountFlag(argv, canonicalBundle, canonicalBundle), "--ro-bind")
+  // Existing Debian trust path remains supported via direct regular files.
+  const debian = resolveSandboxNetworkMounts(hostFs())
+  assert.ok(debian.some((m) => m.target === CA_FILE))
 })
 
 test("no proxy or host env leaks into argv", () => {
