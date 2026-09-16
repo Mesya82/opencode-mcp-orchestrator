@@ -4,6 +4,24 @@ export const SANDBOX_TOOLCHAIN_DIRS_ENV: string
 
 export const SANDBOX_ETC_RO_BINDS: readonly string[]
 
+export const SANDBOX_NETWORK_RESOLVER_BINDS: readonly string[]
+
+export const SANDBOX_NETWORK_CA_FILE_CANDIDATES: readonly string[]
+
+export const SANDBOX_NETWORK_CA_DIR_CANDIDATES: readonly string[]
+
+export type SandboxNetworkAccess = "disabled" | "host"
+
+export function resolveSandboxNetworkMounts(options?: {
+  readonly existsSync?: (path: string) => boolean
+  readonly realpathSync?: (path: string) => string
+  readonly statSync?: (path: string) => {
+    isDirectory(): boolean
+    isFile(): boolean
+  }
+  readonly env?: NodeJS.ProcessEnv
+}): Array<{ source: string; target: string }>
+
 export function isWithin(root: string, candidate: string): boolean
 
 export function addAbsoluteWorktreeBind(
@@ -108,6 +126,7 @@ export function buildBaseSandboxArgv(
   sandboxCwd: string,
   options?: {
     readonly readonlyWorkspace?: boolean
+    readonly networkAccess?: SandboxNetworkAccess
     readonly toolchainDirs?: string[]
     readonly runtime?: SandboxBubblewrapRuntime
     readonly safePath?: string

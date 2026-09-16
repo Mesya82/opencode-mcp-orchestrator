@@ -40,6 +40,7 @@ import {
 } from "node:path"
 
 import {
+  normalizeSandboxNetworkAccess,
   sandboxIsolationArgv,
 } from "./sandbox-isolation.mjs"
 
@@ -55,6 +56,30 @@ export const SANDBOX_ETC_RO_BINDS = Object.freeze([
   "/etc/group",
   "/etc/localtime",
   "/etc/gitconfig",
+])
+
+/*
+ * Host-network support mounts: the only additional read-only mounts
+ * permitted when networkAccess is "host". Resolver/hosts files keep
+ * ordinary DNS behavior; the CA bundle/store keeps ordinary HTTPS CLI
+ * behavior. Never broadened to /etc, /etc/ssl, /etc/ssl/private, HOME,
+ * or a parent fallback.
+ */
+export const SANDBOX_NETWORK_RESOLVER_BINDS = Object.freeze([
+  "/etc/resolv.conf",
+  "/etc/hosts",
+])
+
+export const SANDBOX_NETWORK_CA_FILE_CANDIDATES = Object.freeze([
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/certs/ca-bundle.crt",
+  "/etc/ssl/cert.pem",
+])
+
+export const SANDBOX_NETWORK_CA_DIR_CANDIDATES = Object.freeze([
+  "/etc/ssl/certs",
+  "/etc/pki/tls/certs",
 ])
 
 const SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT =
@@ -775,6 +800,163 @@ export function addSandboxRuntimeBinds(argv, roots) {
   }
 }
 
+function isForbiddenNetworkTarget(canonical, home) {
+  if (
+    canonical === "/etc" ||
+    canonical === "/etc/ssl" ||
+    canonical === "/etc/ssl/private" ||
+    canonical === "/" ||
+    canonical === "/home" ||
+    canonical === "/tmp"
+  ) {
+    return true
+  }
+  if (isWithin("/etc/ssl/private", canonical)) return true
+  if (SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT.has(canonical)) return true
+  if (!home) return false
+  if (canonical === home || isWithin(home, canonical)) return true
+  return false
+}
+
+function isAllowedResolverCanonical(source, canonical) {
+  if (source === "/etc/hosts") return canonical === source
+  if (source !== "/etc/resolv.conf") return false
+  if (canonical === source) return true
+  return [
+    "/run/systemd/resolve",
+    "/run/NetworkManager",
+    "/run/resolvconf",
+    "/run/connman",
+    "/etc/resolvconf/run",
+  ].some((root) => isWithin(root, canonical))
+}
+
+function isAllowedCaCanonical(canonical) {
+  if (isWithin("/etc/ssl/private", canonical)) return false
+  return (
+    isWithin("/etc/ssl", canonical) ||
+    isWithin("/etc/pki", canonical) ||
+    isWithin("/usr/share/ca-certificates", canonical)
+  )
+}
+
+/*
+ * Resolve the narrow read-only network-support mounts for host mode.
+ * Returns [{ source, target }] with target === source. Symlink-backed
+ * sources are resolved via realpath and validated for safe location and
+ * file type. Resolver files are best-effort (skipped when absent);
+ * at least one usable CA trust source (file or directory) is required
+ * and throws fail-closed when none is available.
+ */
+export function resolveSandboxNetworkMounts(options = {}) {
+  const existsFn = options.existsSync ?? fsExistsSync
+  const realpathFn = options.realpathSync ?? fsRealpathSync
+  const statFn = options.statSync ?? fsStatSync
+  const env = options.env ?? process.env
+  const home = env?.HOME
+  let canonicalHome
+  try {
+    canonicalHome = home ? realpathFn(home) : undefined
+  } catch {
+    canonicalHome = undefined
+  }
+  const mounts = []
+  const seen = new Set()
+
+  const pushMount = (source) => {
+    if (seen.has(source)) return
+    seen.add(source)
+    mounts.push({ source, target: source })
+  }
+
+  for (const source of SANDBOX_NETWORK_RESOLVER_BINDS) {
+    let present = false
+    try {
+      present = existsFn(source)
+    } catch {
+      present = false
+    }
+    if (!present) continue
+    let canonical
+    try {
+      canonical = realpathFn(source)
+    } catch {
+      continue
+    }
+    if (!isAbsolute(canonical)) continue
+    let info
+    try {
+      info = statFn(canonical)
+    } catch {
+      continue
+    }
+    if (!info.isFile || !info.isFile()) continue
+    if (!isAllowedResolverCanonical(source, canonical)) continue
+    if (isForbiddenNetworkTarget(canonical, canonicalHome)) continue
+    if (canonical !== source) {
+      // Resolved target must itself be the validated file; bind the
+      // original path only when the backing file is safe. bwrap
+      // --ro-bind follows the host path, so both must be safe.
+      if (isForbiddenNetworkTarget(source, canonicalHome)) continue
+    }
+    pushMount(source)
+  }
+
+  let caFound = false
+  const considerCa = (source, kind) => {
+    let present = false
+    try {
+      present = existsFn(source)
+    } catch {
+      present = false
+    }
+    if (!present) return
+    let canonical
+    try {
+      canonical = realpathFn(source)
+    } catch {
+      return
+    }
+    if (!isAbsolute(canonical)) return
+    let info
+    try {
+      info = statFn(canonical)
+    } catch {
+      return
+    }
+    if (kind === "file") {
+      if (!info.isFile || !info.isFile()) return
+    } else {
+      if (!info.isDirectory || !info.isDirectory()) return
+    }
+    if (canonical === "/etc" || canonical === "/etc/ssl") return
+    if (!isAllowedCaCanonical(canonical)) return
+    if (isForbiddenNetworkTarget(canonical, canonicalHome)) return
+    pushMount(source)
+    caFound = true
+  }
+
+  for (const source of SANDBOX_NETWORK_CA_FILE_CANDIDATES) {
+    considerCa(source, "file")
+  }
+  for (const source of SANDBOX_NETWORK_CA_DIR_CANDIDATES) {
+    considerCa(source, "dir")
+  }
+
+  if (!caFound) {
+    throw new Error("no usable CA trust source for host networking")
+  }
+
+  return mounts
+}
+
+function addSandboxNetworkBinds(argv, mounts) {
+  for (const mount of mounts) {
+    ensureEmptyAncestorDirs(argv, mount.target)
+    argv.push("--ro-bind", mount.source, mount.target)
+  }
+}
+
 function validateCanonicalRoot(entry, home, realpathFn, statFn) {
   let canonical
 
@@ -914,6 +1096,9 @@ export function buildBaseSandboxArgv(
   const realpathFn = options.realpathSync ?? fsRealpathSync
   const statFn = options.statSync ?? fsStatSync
   const readonlyWorkspace = options.readonlyWorkspace === true
+  const networkAccess = normalizeSandboxNetworkAccess(
+    options.networkAccess,
+  )
   const toolchainDirs = options.toolchainDirs ?? []
   const runtime = options.runtime ?? {
     mountRoots: [],
@@ -931,7 +1116,7 @@ export function buildBaseSandboxArgv(
   const argv = [
     SANDBOX_BWRAP_BIN,
 
-    ...sandboxIsolationArgv(),
+    ...sandboxIsolationArgv({ networkAccess }),
 
     "--ro-bind", "/usr", "/usr",
 
@@ -1082,6 +1267,18 @@ export function buildBaseSandboxArgv(
 
   for (const path of SANDBOX_ETC_RO_BINDS) {
     roBindIfExists(argv, path, existsFn)
+  }
+
+  if (networkAccess === "host") {
+    addSandboxNetworkBinds(
+      argv,
+      resolveSandboxNetworkMounts({
+        existsSync: existsFn,
+        realpathSync: realpathFn,
+        statSync: statFn,
+        env: options.env,
+      }),
+    )
   }
 
   const mountRoots = [...new Set([

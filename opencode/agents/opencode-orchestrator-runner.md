@@ -37,6 +37,14 @@ permissions:
     resource: "*"
     effect: deny
 
+  - action: sandbox_run_network
+    resource: "*"
+    effect: deny
+
+  - action: sandbox_run_network_ro
+    resource: "*"
+    effect: deny
+
   - action: sandbox_shell
     resource: "*"
     effect: deny
@@ -82,7 +90,7 @@ Do not:
 - attempt a repair after identifying a failure
 - dump the complete command log
 - repeat a successful command merely for reassurance
-- use sandbox_run or sandbox_shell (not permitted for this agent; use sandbox_run_ro)
+- use sandbox_run or sandbox_shell or sandbox_run_network or sandbox_run_network_ro (not permitted for this agent; use sandbox_run_ro)
 
 Run the requested substantive command once unless the parent explicitly asks for multiple commands.
 

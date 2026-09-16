@@ -32,6 +32,7 @@ import {
 
 import {
   hasNetworklessIsolation,
+  normalizeSandboxNetworkAccess,
 } from "../../../config/sandbox-isolation.mjs"
 
 import {
@@ -772,11 +773,15 @@ export function resolveSandboxCwd(
     : "/workspace/" + rel.split(sep).join("/")
 }
 
+export type SandboxNetworkAccess =
+  "disabled" | "host"
+
 export function baseSandboxArgs(
   worktree: string,
   sandboxCwd: string,
   options?: {
     readonlyWorkspace?: boolean
+    networkAccess?: SandboxNetworkAccess
   },
 ): string[] {
   const toolchainDirs =
@@ -790,6 +795,9 @@ export function baseSandboxArgs(
     {
       readonlyWorkspace:
         options?.readonlyWorkspace,
+      networkAccess: normalizeSandboxNetworkAccess(
+        options?.networkAccess,
+      ),
       toolchainDirs,
       runtime,
     },
@@ -1335,6 +1343,7 @@ export function buildSandboxRunArgv(
   command: string,
   options?: {
     readonlyWorkspace?: boolean
+    networkAccess?: SandboxNetworkAccess
     logLimitBytes?: number
   },
 ): string[] {
@@ -1372,6 +1381,7 @@ async function executeSandboxRun(
   input: SandboxRunInput,
   options: {
     readonlyWorkspace: boolean
+    networkAccess?: SandboxNetworkAccess
   },
 ): Promise<{ content: string }> {
   const limits = resolveSandboxLimits()
@@ -1420,6 +1430,9 @@ async function executeSandboxRun(
     {
       readonlyWorkspace:
         options.readonlyWorkspace,
+      networkAccess: normalizeSandboxNetworkAccess(
+        options.networkAccess,
+      ),
       logLimitBytes:
         limits.runnerLogLimitBytes,
     },
@@ -1735,6 +1748,80 @@ export default Plugin.define({
             worktree,
             input as SandboxRunInput,
             { readonlyWorkspace: true },
+          )
+        },
+      })
+
+      editor.add({
+        name: "sandbox_run_network",
+
+        description:
+          "Run one potentially noisy local command in a hard sandbox with host network access. " +
+          "Full combined stdout/stderr is persisted outside model context for later inspection with sandbox_log. " +
+          "Workspace is writable, Git metadata is read-only, host HOME and credentials are unavailable.",
+
+        input: sandboxRunInputSchema(),
+
+        options: {
+          codemode: false,
+        },
+
+        execute: async (input, context) => {
+          const worktree =
+            await resolveSessionWorktree(
+              context as
+                | SessionWorktreeContext
+                | undefined,
+              (args) =>
+                ctx.session.get(
+                  args as never,
+                ) as Promise<unknown>,
+            )
+
+          return executeSandboxRun(
+            worktree,
+            input as SandboxRunInput,
+            {
+              readonlyWorkspace: false,
+              networkAccess: "host",
+            },
+          )
+        },
+      })
+
+      editor.add({
+        name: "sandbox_run_network_ro",
+
+        description:
+          "Run one potentially noisy local command in a hard sandbox with host network access and a read-only repository workspace. " +
+          "Full combined stdout/stderr is persisted outside model context for later inspection with sandbox_log. " +
+          "Workspace is read-only, /runner-output and /tmp remain writable, Git metadata is read-only, host HOME and credentials are unavailable.",
+
+        input: sandboxRunInputSchema(),
+
+        options: {
+          codemode: false,
+        },
+
+        execute: async (input, context) => {
+          const worktree =
+            await resolveSessionWorktree(
+              context as
+                | SessionWorktreeContext
+                | undefined,
+              (args) =>
+                ctx.session.get(
+                  args as never,
+                ) as Promise<unknown>,
+            )
+
+          return executeSandboxRun(
+            worktree,
+            input as SandboxRunInput,
+            {
+              readonlyWorkspace: true,
+              networkAccess: "host",
+            },
           )
         },
       })

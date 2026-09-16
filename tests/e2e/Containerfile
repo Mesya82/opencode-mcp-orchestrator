@@ -41,6 +41,7 @@ RUN apt-get update \
     git \
     jq \
     libcap2 \
+    openssl \
     python3 \
     unzip \
   && rm -rf /var/lib/apt/lists/*
@@ -54,6 +55,38 @@ RUN useradd \
   --create-home \
   --shell /bin/bash \
   tester
+
+# Deterministic E2E PKI for the dedicated test hostname. Generated once at
+# image build (no network): a test CA trusted through the system bundle plus
+# a server cert whose SAN matches E2E_TEST_HOSTNAME. The runner network E2E
+# serves HTTPS with this cert and verifies it inside the sandbox through the
+# same narrowly mounted CA mechanism production uses.
+ENV E2E_TEST_HOSTNAME=e2e-hostmode.test
+
+RUN mkdir -p /e2e/certs \
+  && openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+    -addext "basicConstraints=critical,CA:true" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout /e2e/certs/test-ca.key -out /e2e/certs/test-ca.crt \
+    -subj "/CN=e2e-test-ca" \
+  && openssl req -newkey rsa:2048 -nodes \
+    -keyout /e2e/certs/server.key -out /e2e/certs/server.csr \
+    -subj "/CN=${E2E_TEST_HOSTNAME}" \
+  && printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\nkeyUsage=digitalSignature,keyEncipherment\n' "$E2E_TEST_HOSTNAME" \
+    > /e2e/certs/server-san.ext \
+  && openssl x509 -req -sha256 -days 3650 \
+    -in /e2e/certs/server.csr \
+    -CA /e2e/certs/test-ca.crt -CAkey /e2e/certs/test-ca.key -CAcreateserial \
+    -extfile /e2e/certs/server-san.ext \
+    -out /e2e/certs/server.crt \
+  && rm -f /e2e/certs/server.csr /e2e/certs/test-ca.srl \
+  && cp /e2e/certs/test-ca.crt /usr/local/share/ca-certificates/e2e-test-ca.crt \
+  && update-ca-certificates \
+  && openssl x509 -in /e2e/certs/server.crt -noout -ext subjectAltName \
+  && openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /e2e/certs/server.crt \
+  && chown -R tester:tester /e2e/certs \
+  && chmod 644 /e2e/certs/server.crt /e2e/certs/test-ca.crt \
+  && chmod 600 /e2e/certs/server.key /e2e/certs/test-ca.key
 
 USER tester
 
@@ -74,6 +107,10 @@ COPY --chown=tester:tester \
 COPY --chown=tester:tester \
   tests/e2e/session-wait-refresh-probe.mjs \
   /e2e/session-wait-refresh-probe.mjs
+
+COPY --chown=tester:tester \
+  tests/e2e/network-access.mjs \
+  /e2e/network-access.mjs
 
 COPY --chown=tester:tester \
   tests/unit/linked-git-worktree.test.mjs \

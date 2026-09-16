@@ -202,7 +202,10 @@ not from the task text.
 Read-only Runner commands cannot create build, cache, coverage, or other
 workspace files; only the host output directory and sandbox `/tmp` stay
 writable. Use writable mode when the requested command legitimately needs to
-write the workspace, then report the resulting status delta.
+write the workspace, then report the resulting status delta. Network access
+is likewise explicit: `network_access` defaults to `disabled` and is
+independent of `workspace_access`, giving four agent/tool combinations;
+request `"host"` only as explicit escalation for a trusted command.
 
 ## Runner log retention
 
@@ -484,6 +487,16 @@ restored/verified as `1` afterwards. This confirms the CI-only policy remedy;
 the Docker launcher and production network isolation were not weakened.
 The review gate is resolved. Installed two-worktree live testing remains a
 separate follow-up, not evidence supplied by this provider-free E2E.
+
+## Runner host networking (resolved design)
+
+`network_access` defaults to `disabled` and is independent of
+`workspace_access` (four permission-scoped agent/tool combinations).
+Doctor probes and `sandbox_shell` stay networkless; host mode only removes
+the network namespace while keeping `--clearenv`, filesystem protections,
+and enumerated read-only resolver/hosts/CA trust mounts. Treat `"host"`
+as explicit capability escalation with egress/exfiltration scope, never as
+an automatic retry for networkless failures.
 
 ## Upstream audit finding with no available fix
 

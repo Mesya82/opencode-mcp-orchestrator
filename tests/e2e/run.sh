@@ -145,6 +145,50 @@ fi
 echo LINKED_WORKTREE_BWRAP_E2E_OK
 
 echo
+echo "=== RUNNER NETWORK ACCESS (REAL BWRAP) ==="
+
+NETWORK_LOG="/tmp/runner-network-access-e2e.log"
+
+node \
+  /e2e/network-access.mjs \
+  >"$NETWORK_LOG" \
+  2>&1
+
+NETWORK_STATUS=$?
+
+cat "$NETWORK_LOG"
+
+test "$NETWORK_STATUS" -eq 0 || \
+  fail "runner network access e2e exited $NETWORK_STATUS"
+
+grep -Fq \
+  "RUNNER_NETWORK_ACCESS_E2E_OK" \
+  "$NETWORK_LOG" || \
+  fail "runner network access success marker missing"
+
+grep -Fq \
+  "LOOPBACK_HTTP_HOST_OK" \
+  "$NETWORK_LOG" || \
+  fail "numeric loopback HTTP host proof missing"
+
+grep -Fq \
+  "LOOPBACK_HTTP_DISABLED_DENY_OK" \
+  "$NETWORK_LOG" || \
+  fail "numeric loopback HTTP disabled-deny proof missing"
+
+grep -Fq \
+  "DNS_RESOLVER_HOST_OK" \
+  "$NETWORK_LOG" || \
+  fail "deterministic DNS host proof missing"
+
+grep -Fq \
+  "TLS_VERIFIED_HOST_OK" \
+  "$NETWORK_LOG" || \
+  fail "verified HTTPS host proof missing"
+
+echo RUNNER_NETWORK_ACCESS_E2E_STAGE_OK
+
+echo
 echo "=== INSTALL LATEST CLIENTS ==="
 
 echo

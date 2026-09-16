@@ -332,6 +332,9 @@ The installer adds:
     ~/.config/opencode/agents/opencode-orchestrator-scout.md
     ~/.config/opencode/agents/opencode-orchestrator-worker.md
     ~/.config/opencode/agents/opencode-orchestrator-runner.md
+    ~/.config/opencode/agents/opencode-orchestrator-runner-writable.md
+    ~/.config/opencode/agents/opencode-orchestrator-runner-network.md
+    ~/.config/opencode/agents/opencode-orchestrator-runner-writable-network.md
 
     ~/.config/opencode/plugins/opencode-mcp-orchestrator/index.ts
 
@@ -432,7 +435,25 @@ Examples:
 The parent receives a concise analysis rather than the entire command output.
 
 Runner `workspace_access` defaults to `read_only`; request `"writable"`
-explicitly when the command must write the workspace. Details and log
+explicitly when the command must write the workspace. Runner
+`network_access` defaults to `disabled`; request `"host"` explicitly only
+when the exact command and repository code are trusted to use host
+networking. The two modes are independent, giving four combinations
+(`read_only`/`writable` × `disabled`/`host`), each enforced by a separate
+permission-scoped agent and execution tool (`sandbox_run_ro`,
+`sandbox_run`, `sandbox_run_network_ro`, `sandbox_run_network`).
+
+Host networking shares the host network namespace, which is broader than
+Internet access: it may reach the Internet, LAN, link-local, and loopback
+addresses, plus applicable namespace-scoped abstract Unix sockets, and can
+exfiltrate sandbox-visible data. Read-only mode prevents workspace writes
+but does not prevent exfiltration. Host mode adds only enumerated
+read-only mounts for `/etc/resolv.conf`, `/etc/hosts`, and a CA trust
+source; it does not expose host HOME or credentials, `--clearenv` remains
+in effect, and proxy variables are not inherited. `sandbox_shell` and the
+Doctor probes remain networkless. The Runner tool schema is
+`cwd`, `command`, `objective`, plus existing optional `expected`,
+`timeout_seconds`, `workspace_access`, and `network_access`. Details and log
 retention are in docs/orchestration-friction.md.
 
 Deployments and similarly high-risk operations are intentionally not delegated
@@ -445,7 +466,9 @@ The delegated command environment has been designed and tested so that:
 - Scout cannot write the workspace.
 - Worker can edit ordinary workspace files.
 - Git metadata is read-only for Worker and Runner tooling.
-- delegated shell commands have no outbound network access
+- delegated shell commands have no outbound network access by default;
+  Runner `network_access` defaults to `disabled` and host networking
+  requires an explicit `"host"` grant
 - orchestrator/provider credentials are not exposed to delegated commands
 - secret files outside the sandbox are not readable
 - Runner can persist and analyze large command logs without returning the full

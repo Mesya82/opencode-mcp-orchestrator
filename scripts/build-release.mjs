@@ -366,6 +366,8 @@ for (
     "worker",
     "runner",
     "runner-writable",
+    "runner-network",
+    "runner-writable-network",
   ]
 ) {
   const name =
