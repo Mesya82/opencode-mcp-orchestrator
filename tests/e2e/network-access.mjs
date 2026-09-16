@@ -662,6 +662,114 @@ async function runSslCertPemRegression(hostArgv, disabledArgv, { httpsPort }) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Arch extracted + SUSE generated CA regressions (real bwrap 0.12.0)    */
+/* ------------------------------------------------------------------ */
+
+async function runArchCaRegression(hostArgv, disabledArgv, { httpsPort }) {
+  const bundle = "/etc/ca-certificates/extracted/tls-ca-bundle.pem"
+  const cadir = "/etc/ca-certificates/extracted/cadir"
+  const compat = "/etc/ssl/certs/ca-bundle.crt"
+  if (realpathSync(compat) !== bundle) {
+    throw new Error(`unexpected Arch CA fixture target for ${compat}`)
+  }
+  if (!hasBind(hostArgv, bundle, bundle)) {
+    throw new Error("production argv omitted the Arch native bundle bind")
+  }
+  if (!hasBind(hostArgv, cadir, cadir)) {
+    throw new Error("production argv omitted the Arch native cadir bind")
+  }
+  if (hasBind(hostArgv, "/etc/ssl", "/etc/ssl")) {
+    throw new Error("production argv unexpectedly broad-binds /etc/ssl")
+  }
+  if (hasBind(disabledArgv, bundle, bundle)) {
+    throw new Error("disabled production argv unexpectedly binds the Arch bundle")
+  }
+  console.log("ARCH_CA_NARROW_BINDS_OK")
+  const expected = readFileSync(bundle, "utf8")
+  const probe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/bin/cat", compat,
+  ])
+  if (probe.code !== 0 || probe.stdout !== expected) {
+    throw new Error(
+      "Arch /etc/ssl compatibility path did not resolve into " +
+        "/etc/ca-certificates/extracted inside real Bubblewrap 0.12.0 " +
+        `(exit=${probe.code} timedOut=${probe.timedOut} ` +
+        `stderr=${probe.stderr.trim().slice(0, 500)}).`,
+    )
+  }
+  console.log("ARCH_CA_COMPAT_RESOLVE_OK")
+  const tlsProbe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/usr/bin/curl",
+    "--connect-timeout", String(CONNECT_TIMEOUT_S),
+    "--max-time", String(CURL_MAX_TIME_S),
+    "-fsS", "--cacert", compat,
+    "--resolve", `${TEST_HOSTNAME}:${httpsPort}:127.0.0.1`,
+    `https://${TEST_HOSTNAME}:${httpsPort}/marker`,
+  ])
+  if (tlsProbe.code !== 0 || tlsProbe.stdout.trim() !== TLS_MARKER) {
+    throw new Error(
+      "explicit TLS verification through the Arch compatibility path did not succeed " +
+        `(exit=${tlsProbe.code} timedOut=${tlsProbe.timedOut} ` +
+        `stderr=${tlsProbe.stderr.trim().slice(0, 800)}).`,
+    )
+  }
+  console.log("TLS_CACERT_ARCH_OK")
+}
+
+async function runSuseCaRegression(hostArgv, disabledArgv, { httpsPort }) {
+  const bundle = "/var/lib/ca-certificates/ca-bundle.pem"
+  const store = "/var/lib/ca-certificates/openssl"
+  if (!hasBind(hostArgv, bundle, bundle)) {
+    throw new Error("production argv omitted the SUSE bundle bind")
+  }
+  if (!hasBind(hostArgv, store, store)) {
+    throw new Error("production argv omitted the SUSE openssl store bind")
+  }
+  for (const [source, target] of [["/var", "/var"], ["/var/lib", "/var/lib"]]) {
+    if (hasBind(hostArgv, source, target)) {
+      throw new Error(`production argv unexpectedly broad-binds ${source}`)
+    }
+  }
+  if (hasBind(disabledArgv, bundle, bundle)) {
+    throw new Error("disabled production argv unexpectedly binds the SUSE bundle")
+  }
+  console.log("SUSE_CA_NARROW_BINDS_OK")
+  console.log("SUSE_NO_BROAD_VAR_OK")
+  const expected = readFileSync(bundle, "utf8")
+  const probe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/bin/cat", bundle,
+  ])
+  if (probe.code !== 0 || probe.stdout !== expected) {
+    throw new Error(
+      "SUSE bundle was not visible at its /var/lib path inside real Bubblewrap 0.12.0 " +
+        `(exit=${probe.code} timedOut=${probe.timedOut} ` +
+        `stderr=${probe.stderr.trim().slice(0, 500)}).`,
+    )
+  }
+  console.log("SUSE_CA_BUNDLE_VISIBLE_OK")
+  const tlsProbe = await runCommand(hostArgv[0], [
+    ...hostArgv.slice(1),
+    "/usr/bin/curl",
+    "--connect-timeout", String(CONNECT_TIMEOUT_S),
+    "--max-time", String(CURL_MAX_TIME_S),
+    "-fsS", "--cacert", bundle,
+    "--resolve", `${TEST_HOSTNAME}:${httpsPort}:127.0.0.1`,
+    `https://${TEST_HOSTNAME}:${httpsPort}/marker`,
+  ])
+  if (tlsProbe.code !== 0 || tlsProbe.stdout.trim() !== TLS_MARKER) {
+    throw new Error(
+      "explicit TLS verification through the SUSE bundle did not succeed " +
+        `(exit=${tlsProbe.code} timedOut=${tlsProbe.timedOut} ` +
+        `stderr=${tlsProbe.stderr.trim().slice(0, 800)}).`,
+    )
+  }
+  console.log("TLS_CACERT_SUSE_OK")
+}
+
+/* ------------------------------------------------------------------ */
 /* Full E2E                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -928,6 +1036,16 @@ async function runFullE2e() {
 
     checkDeadline("/etc/ssl/cert.pem CA layout inside real bwrap")
     await runSslCertPemRegression(hostArgv, disabledArgv, {
+      httpsPort: httpsEndpoint.port,
+    })
+
+    checkDeadline("Arch CA layout inside real bwrap")
+    await runArchCaRegression(hostArgv, disabledArgv, {
+      httpsPort: httpsEndpoint.port,
+    })
+
+    checkDeadline("SUSE CA layout inside real bwrap")
+    await runSuseCaRegression(hostArgv, disabledArgv, {
       httpsPort: httpsEndpoint.port,
     })
 

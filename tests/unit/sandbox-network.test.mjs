@@ -358,6 +358,80 @@ test("symlink-backed CA file with forbidden lexical source fails closed", () => 
   )
 })
 
+test("Arch native extracted trust yields narrow usable mounts", () => {
+  const bundle = "/etc/ca-certificates/extracted/tls-ca-bundle.pem"
+  const cadir = "/etc/ca-certificates/extracted/cadir"
+  const mounts = resolveSandboxNetworkMounts(
+    fakeNetworkFs({
+      files: new Set(["/etc/resolv.conf", bundle]),
+      dirs: new Set([cadir]),
+    }),
+  )
+  assert.ok(mounts.some((m) => m.source === bundle && m.target === bundle))
+  assert.ok(mounts.some((m) => m.source === cadir && m.target === cadir))
+  for (const m of mounts) {
+    assert.ok(m.source !== "/etc" && m.target !== "/etc")
+    assert.ok(m.source !== "/etc/ssl" && m.target !== "/etc/ssl")
+  }
+  // Arch /etc/ssl compatibility symlink resolves via the extracted source.
+  const compat = "/etc/ssl/certs/ca-certificates.crt"
+  const compatMounts = resolveSandboxNetworkMounts(
+    fakeNetworkFs({
+      files: new Set(["/etc/resolv.conf", compat, bundle]),
+      dirs: new Set([cadir]),
+      realpath: (p) => p === compat ? bundle : p,
+    }),
+  )
+  assert.ok(compatMounts.some((m) => m.source === bundle && m.target === bundle))
+  assert.ok(!compatMounts.some((m) => m.target === compat && m.source === compat))
+})
+
+test("SUSE bundle and openssl store yield narrow mounts without broad /var", () => {
+  const bundle = "/var/lib/ca-certificates/ca-bundle.pem"
+  const store = "/var/lib/ca-certificates/openssl"
+  const mounts = resolveSandboxNetworkMounts(
+    fakeNetworkFs({
+      files: new Set(["/etc/resolv.conf", bundle]),
+      dirs: new Set([store]),
+    }),
+  )
+  assert.ok(mounts.some((m) => m.source === bundle && m.target === bundle))
+  assert.ok(mounts.some((m) => m.source === store && m.target === store))
+  for (const m of mounts) {
+    assert.ok(m.source !== "/var" && m.target !== "/var")
+    assert.ok(m.source !== "/var/lib" && m.target !== "/var/lib")
+    assert.ok(!m.target.startsWith("/var/lib/ca-certificates/private"))
+  }
+  const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
+  const argv = buildBaseSandboxArgv(wt, "/workspace", {
+    networkAccess: "host",
+    ...fakeNetworkFs({
+      files: new Set(["/etc/resolv.conf", "/etc/hosts", bundle]),
+      dirs: new Set([store]),
+    }),
+  })
+  assert.equal(mountFlag(argv, bundle, bundle), "--ro-bind")
+  assert.equal(mountFlag(argv, store, store), "--ro-bind")
+  assert.equal(mountFlag(argv, "/var", "/var"), undefined)
+  assert.equal(mountFlag(argv, "/var/lib", "/var/lib"), undefined)
+})
+
+test("compatibility-dir-only with uncovered symlink targets fails closed", () => {
+  assert.throws(
+    () => resolveSandboxNetworkMounts(
+      fakeNetworkFs({
+        files: new Set(["/etc/resolv.conf"]),
+        dirs: new Set(["/etc/ssl/certs"]),
+        realpath: (p) =>
+          p === "/etc/ssl/certs"
+            ? "/etc/pki/ca-trust/extracted/pem/tls-compat-only"
+            : p,
+      }),
+    ),
+    /CA trust source/,
+  )
+})
+
 test("no proxy or host env leaks into argv", () => {
   const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
   process.env.HTTP_PROXY = "http://proxy.example:8080"

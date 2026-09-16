@@ -76,11 +76,15 @@ export const SANDBOX_NETWORK_CA_FILE_CANDIDATES = Object.freeze([
   "/etc/pki/tls/certs/ca-bundle.crt",
   "/etc/ssl/certs/ca-bundle.crt",
   "/etc/ssl/cert.pem",
+  "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+  "/var/lib/ca-certificates/ca-bundle.pem",
 ])
 
 export const SANDBOX_NETWORK_CA_DIR_CANDIDATES = Object.freeze([
   "/etc/ssl/certs",
   "/etc/pki/tls/certs",
+  "/etc/ca-certificates/extracted/cadir",
+  "/var/lib/ca-certificates/openssl",
 ])
 
 const SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT =
@@ -849,7 +853,27 @@ function isAllowedCaCanonical(canonical) {
     isWithin("/etc/ssl/certs", canonical) ||
     isWithin("/etc/pki/tls/certs", canonical) ||
     isWithin("/etc/pki/ca-trust/extracted", canonical) ||
-    isWithin("/usr/share/ca-certificates", canonical)
+    isWithin("/usr/share/ca-certificates", canonical) ||
+    isWithin("/etc/ca-certificates/extracted", canonical) ||
+    canonical === "/var/lib/ca-certificates/ca-bundle.pem" ||
+    isWithin("/var/lib/ca-certificates/openssl", canonical)
+  )
+}
+
+/*
+ * Native/hash trust directories that are usable on their own (OpenSSL
+ * hashed stores). Compatibility-only directories (symlink farms whose
+ * targets are not themselves mounted) must not satisfy the usable-trust
+ * predicate alone: success requires a validated regular bundle file, or
+ * a mounted native/hash directory. Explicit native candidates suffice;
+ * no broad directory traversal is performed.
+ */
+function isNativeCaTrustDirCanonical(canonical) {
+  return (
+    isWithin("/etc/ssl/certs", canonical) ||
+    isWithin("/etc/pki/tls/certs", canonical) ||
+    isWithin("/etc/ca-certificates/extracted/cadir", canonical) ||
+    isWithin("/var/lib/ca-certificates/openssl", canonical)
   )
 }
 
@@ -946,7 +970,7 @@ export function resolveSandboxNetworkMounts(options = {}) {
     throw new Error("no usable resolver configuration for host networking")
   }
 
-  let caFound = false
+  let usableTrustFound = false
   const emittedCaDirs = new Set()
   const considerCa = (source, kind) => {
     let present = false
@@ -996,12 +1020,34 @@ export function resolveSandboxNetworkMounts(options = {}) {
       } else {
         pushMount(canonical, source)
       }
-      caFound = true
+      usableTrustFound = true
+      return
+    }
+    if (kind === "dir") {
+      // Directory symlinks: never mount onto the lexical symlink
+      // destination. Mount the validated canonical directory at its
+      // canonical destination so preserved symlinks resolve, and record
+      // the lexical parent as emitted for symlink-backed file handling.
+      // Only native/hash trust directories count toward usable trust;
+      // compatibility-only directories alone fail closed.
+      if (canonical !== source) {
+        if (isForbiddenNetworkTarget(source, canonicalHome)) return
+        pushMount(canonical, canonical)
+        emittedCaDirs.add(source)
+        if (isNativeCaTrustDirCanonical(canonical)) {
+          usableTrustFound = true
+        }
+        return
+      }
+      pushMount(source)
+      emittedCaDirs.add(source)
+      if (isNativeCaTrustDirCanonical(canonical)) {
+        usableTrustFound = true
+      }
       return
     }
     pushMount(source)
-    if (kind === "dir") emittedCaDirs.add(source)
-    caFound = true
+    usableTrustFound = true
   }
 
   // Bubblewrap processes mounts in command-line order. Bind directories
@@ -1016,7 +1062,7 @@ export function resolveSandboxNetworkMounts(options = {}) {
     considerCa(source, "file")
   }
 
-  if (!caFound) {
+  if (!usableTrustFound) {
     throw new Error("no usable CA trust source for host networking")
   }
 

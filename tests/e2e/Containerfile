@@ -71,6 +71,31 @@ RUN ln -sf certs/ca-certificates.crt /etc/ssl/cert.pem \
   && test "$(readlink -f /etc/ssl/cert.pem)" \
     = /etc/ssl/certs/ca-certificates.crt
 
+# Exercise the Arch extracted trust layout through narrow binds: the native
+# extracted bundle plus the native hashed cadir, with an /etc/ssl
+# compatibility symlink resolving into the extracted sources.
+RUN mkdir -p /etc/ca-certificates/extracted/cadir \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+  && ln -sf /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+    /etc/ssl/certs/ca-bundle.crt \
+  && test "$(readlink -f /etc/ssl/certs/ca-bundle.crt)" \
+    = /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/ca-certificates/extracted/cadir/ca-certificates.crt \
+  && test -f /etc/ca-certificates/extracted/tls-ca-bundle.pem
+
+# Exercise the SUSE generated trust layout through narrow binds only: the
+# bundle plus the openssl hashed store at their actual /var/lib paths.
+# Never bind /var or /var/lib broadly.
+RUN mkdir -p /var/lib/ca-certificates/openssl \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /var/lib/ca-certificates/ca-bundle.pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /var/lib/ca-certificates/openssl/ca-certificates.crt \
+  && test -f /var/lib/ca-certificates/ca-bundle.pem \
+  && test -f /var/lib/ca-certificates/openssl/ca-certificates.crt
+
 RUN useradd \
   --create-home \
   --shell /bin/bash \
@@ -107,6 +132,17 @@ RUN mkdir -p /e2e/certs \
   && chown -R tester:tester /e2e/certs \
   && chmod 644 /e2e/certs/server.crt /e2e/certs/test-ca.crt \
   && chmod 600 /e2e/certs/server.key /e2e/certs/test-ca.key
+
+# Refresh Arch/SUSE bundles after the test CA is trusted so verification
+# through those narrow layouts succeeds deterministically.
+RUN cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /var/lib/ca-certificates/ca-bundle.pem \
+  && openssl verify -CAfile /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+    /e2e/certs/server.crt \
+  && openssl verify -CAfile /var/lib/ca-certificates/ca-bundle.pem \
+    /e2e/certs/server.crt
 
 USER tester
 
