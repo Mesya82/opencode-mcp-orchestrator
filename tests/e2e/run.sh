@@ -353,7 +353,9 @@ assert_agent_step_limits() {
     "scout:16:12" \
     "worker:32:25" \
     "runner:40:32" \
-    "runner-writable:40:32"
+    "runner-writable:40:32" \
+    "runner-network:40:32" \
+    "runner-writable-network:40:32"
   do
     role="${specification%%:*}"
     remainder="${specification#*:}"
@@ -659,6 +661,8 @@ for managed_path in \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-worker.md" \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner.md" \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner-writable.md" \
+  "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner-network.md" \
+  "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner-writable-network.md" \
   "$XDG_CONFIG_HOME/opencode/plugins/opencode-mcp-orchestrator/index.ts"
 do
   test ! -e "$managed_path" || \

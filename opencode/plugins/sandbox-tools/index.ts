@@ -1830,7 +1830,7 @@ export default Plugin.define({
         name: "sandbox_log",
 
         description:
-          "Inspect the persisted output of a previous sandbox_run or sandbox_run_ro without loading the whole log into model context. " +
+          "Inspect the persisted output of a previous sandbox_run* execution without loading the whole log into model context. " +
           "Supports grep, tail, head, and bounded line ranges.",
 
         input: {

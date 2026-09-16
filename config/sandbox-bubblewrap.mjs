@@ -980,11 +980,15 @@ export function resolveSandboxNetworkMounts(options = {}) {
     caFound = true
   }
 
-  for (const source of SANDBOX_NETWORK_CA_FILE_CANDIDATES) {
-    considerCa(source, "file")
-  }
+  // Bubblewrap processes mounts in command-line order. Bind directories
+  // before files so a later, validated file bind wins when its destination
+  // is nested below a CA directory (notably Fedora/RHEL's symlink-backed
+  // /etc/pki/tls/certs/ca-bundle.crt layout).
   for (const source of SANDBOX_NETWORK_CA_DIR_CANDIDATES) {
     considerCa(source, "dir")
+  }
+  for (const source of SANDBOX_NETWORK_CA_FILE_CANDIDATES) {
+    considerCa(source, "file")
   }
 
   if (!caFound) {

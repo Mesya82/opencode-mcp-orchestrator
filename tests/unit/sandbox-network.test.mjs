@@ -43,6 +43,13 @@ function mountFlag(argv, source, target) {
   return undefined
 }
 
+function mountIndex(argv, source, target) {
+  for (let i = 0; i + 2 < argv.length; i += 1) {
+    if (argv[i + 1] === source && argv[i + 2] === target) return i
+  }
+  return -1
+}
+
 function setenvPairs(argv) {
   const out = new Map()
   for (let i = 0; i + 2 < argv.length; i += 1) {
@@ -265,6 +272,37 @@ test("CA candidates canonicalized into private-key roots are rejected", () => {
   }
 })
 
+test("specific CA files are mounted after overlapping CA directories", () => {
+  const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
+  const bundle = "/etc/pki/tls/certs/ca-bundle.crt"
+  const trustDir = "/etc/pki/tls/certs"
+  const canonicalBundle = "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem"
+  const fs = fakeNetworkFs({
+    files: new Set([
+      "/etc/resolv.conf",
+      bundle,
+      canonicalBundle,
+    ]),
+    dirs: new Set([trustDir]),
+    realpath: (path) => path === bundle ? canonicalBundle : path,
+  })
+
+  const mounts = resolveSandboxNetworkMounts(fs)
+  const dirIndex = mounts.findIndex((mount) => mount.target === trustDir)
+  const fileIndex = mounts.findIndex((mount) => mount.target === bundle)
+  assert.ok(dirIndex >= 0)
+  assert.ok(fileIndex > dirIndex)
+
+  const argv = buildBaseSandboxArgv(wt, "/workspace", {
+    networkAccess: "host",
+    ...fs,
+  })
+  assert.ok(
+    mountIndex(argv, bundle, bundle) > mountIndex(argv, trustDir, trustDir),
+    "validated Fedora/RHEL bundle bind must win after its parent directory",
+  )
+})
+
 test("no proxy or host env leaks into argv", () => {
   const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
   process.env.HTTP_PROXY = "http://proxy.example:8080"
@@ -337,6 +375,10 @@ test("plugin registers four tools; shell stays disabled", async () => {
   assert.deepEqual(
     registered.get("sandbox_run_network_ro").input,
     registered.get("sandbox_run_ro").input,
+  )
+  assert.match(
+    registered.get("sandbox_log").description,
+    /sandbox_run\*/,
   )
   const src = readFileSync(pluginPath, "utf8")
   // sandbox_shell construction must not select host networking.
