@@ -271,6 +271,101 @@ test("timed out diagnostic worker interrupts and preserves the session", async (
   resetBridgeStateForTests()
 })
 
+test("late session creation after timeout is interrupted and preserved", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-preserve-late-create-", async (dir) => {
+    let releaseCreate
+    const createGate = new Promise((resolve) => {
+      releaseCreate = resolve
+    })
+    let createResolved = false
+    const { calls, client } = makeFakeClient({
+      create: async () => {
+        await createGate
+        createResolved = true
+        return { id: "ses_late" }
+      },
+    })
+    const events = []
+    const options = {
+      client,
+      model: stubModel,
+      timeoutMs: 60,
+      parentTimeoutSeconds: 7200,
+      preserveSession: true,
+      diagnosticLog: (event) => events.push(event),
+    }
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        options,
+      ),
+      /timed out after 60ms/,
+    )
+
+    assert.equal(createResolved, false)
+    assert.equal(count(calls, "interrupt"), 0)
+    assert.equal(count(calls, "remove"), 0)
+
+    const createsBefore = count(calls, "create")
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "second task",
+        "opencode-orchestrator-worker",
+        "worker",
+        options,
+      ),
+      /preserved for diagnostics/,
+    )
+
+    assert.equal(count(calls, "create"), createsBefore)
+
+    releaseCreate()
+
+    const deadline = Date.now() + 5000
+
+    while (
+      (count(calls, "interrupt") !== 1 || events.length !== 1) &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+
+    assert.equal(count(calls, "interrupt"), 1)
+    assert.equal(count(calls, "remove"), 0)
+    assert.deepEqual(events, [{
+      event: "session_preserved",
+      session_id: "ses_late",
+      succeeded: false,
+      role: "worker",
+      agent: "opencode-orchestrator-worker",
+      cwd: dir,
+    }])
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "third task",
+        "opencode-orchestrator-worker",
+        "worker",
+        options,
+      ),
+      /preserved for diagnostics.*ses_late/,
+    )
+
+    assert.equal(count(calls, "remove"), 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("diagnostic cleanup is bounded when interruption does not settle", async () => {
   resetBridgeStateForTests()
 

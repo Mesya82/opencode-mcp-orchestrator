@@ -233,7 +233,7 @@ function writerPreservedMessage(directory, sessionID) {
     ? `; preserved OpenCode session: ${sessionID}`
     : ""
 
-  return `writable operation directory is preserved for diagnostics for ${directory}${sessionSuffix}; inspect/export the preserved session, then restart the bridge process before running another writable delegation in this directory`
+  return `writable operation directory is preserved for diagnostics for ${directory}${sessionSuffix}; verify the preserved session is no longer executing, inspect the workspace and inspect/export the preserved session, then restart the bridge process before running another writable delegation in this directory`
 }
 
 function diagnosticEvent(event) {
