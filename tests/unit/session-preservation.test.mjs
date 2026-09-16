@@ -57,6 +57,7 @@ function makeFakeClient(hooks = {}) {
     },
     interrupt: async (input, options) => {
       calls.push(["interrupt", input, options])
+      if (hooks.interrupt) await hooks.interrupt(input, options)
     },
     remove: async (input, options) => {
       calls.push(["remove", input, options])
@@ -70,6 +71,23 @@ function count(calls, name) {
   return calls.filter(([entry]) => entry === name).length
 }
 
+async function assertSecondWriterBlocked(dir, calls, options) {
+  const createsBefore = count(calls, "create")
+
+  await assert.rejects(
+    () => runAgent(
+      dir,
+      "second task",
+      "opencode-orchestrator-worker",
+      "worker",
+      options,
+    ),
+    /preserved for diagnostics.*ses_preserved/,
+  )
+
+  assert.equal(count(calls, "create"), createsBefore)
+}
+
 test("session preservation env flag is opt-in and strict", () => {
   assert.equal(PRESERVE_SESSIONS_ENV_VAR, "OPENCODE_MCP_ORCHESTRATOR_PRESERVE_SESSIONS")
   assert.equal(resolvePreserveSessions({}), false)
@@ -77,6 +95,48 @@ test("session preservation env flag is opt-in and strict", () => {
   assert.equal(resolvePreserveSessions({ [PRESERVE_SESSIONS_ENV_VAR]: "true" }), false)
   assert.equal(resolvePreserveSessions({ [PRESERVE_SESSIONS_ENV_VAR]: "1" }), true)
   assert.equal(resolvePreserveSessions({ [PRESERVE_SESSIONS_ENV_VAR]: " 1 " }), true)
+})
+
+test("normal cleanup remains enabled when preservation is not requested", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-preserve-disabled-", async (dir) => {
+    const { calls, client } = makeFakeClient()
+    const options = {
+      client,
+      model: stubModel,
+      timeoutMs: 5000,
+      parentTimeoutSeconds: 7200,
+      env: {},
+    }
+
+    assert.equal(
+      await runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        options,
+      ),
+      "hello",
+    )
+    assert.equal(
+      await runAgent(
+        dir,
+        "second task",
+        "opencode-orchestrator-worker",
+        "worker",
+        options,
+      ),
+      "hello",
+    )
+
+    assert.equal(count(calls, "create"), 2)
+    assert.equal(count(calls, "interrupt"), 0)
+    assert.equal(count(calls, "remove"), 2)
+  })
+
+  resetBridgeStateForTests()
 })
 
 test("successful diagnostic worker preserves session and blocks another writer", async () => {
@@ -116,20 +176,7 @@ test("successful diagnostic worker preserves session and blocks another writer",
       cwd: dir,
     }])
 
-    const createsBefore = count(calls, "create")
-
-    await assert.rejects(
-      () => runAgent(
-        dir,
-        "second task",
-        "opencode-orchestrator-worker",
-        "worker",
-        options,
-      ),
-      /preserved for diagnostics.*ses_preserved/,
-    )
-
-    assert.equal(count(calls, "create"), createsBefore)
+    await assertSecondWriterBlocked(dir, calls, options)
   })
 
   resetBridgeStateForTests()
@@ -145,6 +192,14 @@ test("failed diagnostic worker interrupts but does not remove preserved session"
       },
     })
     const events = []
+    const options = {
+      client,
+      model: stubModel,
+      timeoutMs: 5000,
+      parentTimeoutSeconds: 7200,
+      preserveSession: true,
+      diagnosticLog: (event) => events.push(event),
+    }
 
     await assert.rejects(
       () => runAgent(
@@ -152,14 +207,7 @@ test("failed diagnostic worker interrupts but does not remove preserved session"
         "task",
         "opencode-orchestrator-worker",
         "worker",
-        {
-          client,
-          model: stubModel,
-          timeoutMs: 5000,
-          parentTimeoutSeconds: 7200,
-          preserveSession: true,
-          diagnosticLog: (event) => events.push(event),
-        },
+        options,
       ),
       (error) => {
         assert.match(error.message, /session exploded/)
@@ -174,6 +222,7 @@ test("failed diagnostic worker interrupts but does not remove preserved session"
     assert.equal(events[0].event, "session_preserved")
     assert.equal(events[0].session_id, "ses_preserved")
     assert.equal(events[0].succeeded, false)
+    await assertSecondWriterBlocked(dir, calls, options)
   })
 
   resetBridgeStateForTests()
@@ -194,6 +243,45 @@ test("timed out diagnostic worker interrupts and preserves the session", async (
         })
       },
     })
+    const options = {
+      client,
+      model: stubModel,
+      timeoutMs: 60,
+      parentTimeoutSeconds: 7200,
+      preserveSession: true,
+      diagnosticLog: () => {},
+    }
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "task",
+        "opencode-orchestrator-worker",
+        "worker",
+        options,
+      ),
+      /timed out after 60ms/,
+    )
+
+    assert.equal(count(calls, "interrupt"), 1)
+    assert.equal(count(calls, "remove"), 0)
+    await assertSecondWriterBlocked(dir, calls, options)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("diagnostic cleanup is bounded when interruption does not settle", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-preserve-hanging-interrupt-", async (dir) => {
+    const { calls, client } = makeFakeClient({
+      wait: async () => {
+        throw new Error("session exploded")
+      },
+      interrupt: async () => new Promise(() => {}),
+    })
+    const events = []
 
     await assert.rejects(
       () => runAgent(
@@ -204,17 +292,20 @@ test("timed out diagnostic worker interrupts and preserves the session", async (
         {
           client,
           model: stubModel,
-          timeoutMs: 60,
+          timeoutMs: 5000,
           parentTimeoutSeconds: 7200,
+          cleanupTimeoutMs: 20,
           preserveSession: true,
-          diagnosticLog: () => {},
+          diagnosticLog: (event) => events.push(event),
         },
       ),
-      /timed out after 60ms/,
+      /session exploded/,
     )
 
     assert.equal(count(calls, "interrupt"), 1)
     assert.equal(count(calls, "remove"), 0)
+    assert.equal(events.length, 1)
+    assert.equal(events[0].session_id, "ses_preserved")
   })
 
   resetBridgeStateForTests()
