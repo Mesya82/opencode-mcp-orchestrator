@@ -355,6 +355,38 @@ const files = [
   },
 
   {
+    role: "runner",
+
+    source:
+      resolve(
+        payload,
+        "opencode/agents/opencode-orchestrator-runner-network.md",
+      ),
+
+    destination:
+      resolve(
+        opencodeConfig,
+        "agents/opencode-orchestrator-runner-network.md",
+      ),
+  },
+
+  {
+    role: "runner",
+
+    source:
+      resolve(
+        payload,
+        "opencode/agents/opencode-orchestrator-runner-writable-network.md",
+      ),
+
+    destination:
+      resolve(
+        opencodeConfig,
+        "agents/opencode-orchestrator-runner-writable-network.md",
+      ),
+  },
+
+  {
     source:
       resolve(
         payload,

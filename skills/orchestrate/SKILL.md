@@ -179,6 +179,26 @@ Runner owns:
 - log searching
 - extracting the smallest useful error or diagnostic evidence
 
+Runner network and workspace modes:
+
+- Runner network access is disabled by default (`network_access` defaults
+  to `"disabled"`).
+- Runner workspace access is independent (`workspace_access` defaults to
+  `"read_only"`), giving four combinations
+  (`read_only`/`writable` × `disabled`/`host`), each enforced by a separate
+  permission-scoped agent and execution tool.
+- The Runner tool schema is `cwd`, `command`, `objective`, plus existing
+  optional `expected`, `timeout_seconds`, `workspace_access`, and
+  `network_access`.
+- Request `network_access: "host"` only when the expected command requires
+  host networking; it is an explicit capability escalation, not a default
+  or a diagnostic fallback.
+- Never automatically retry a networkless failure with `"host"` merely
+  because the failure looks network-related.
+- Host networking shares the host network namespace and can exfiltrate
+  sandbox-visible data; grant it only when the exact command and
+  repository code are trusted.
+
 Runner does not own:
 - source-code changes
 - repairs

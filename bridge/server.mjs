@@ -1218,7 +1218,8 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     (role === "runner" &&
       (overrides.workspaceAccess === "writable" ||
         (overrides.workspaceAccess === undefined &&
-          agent === "opencode-orchestrator-runner-writable")))
+          (agent === "opencode-orchestrator-runner-writable" ||
+            agent === "opencode-orchestrator-runner-writable-network"))))
 
   if (takesWriterLock) {
     acquireWriterLock(directory)
@@ -1623,6 +1624,55 @@ export function mcpRequestSignal(ctx) {
   )
 }
 
+export const RUNNER_WORKSPACE_ACCESS_VALUES = ["read_only", "writable"]
+export const RUNNER_NETWORK_ACCESS_VALUES = ["disabled", "host"]
+
+export function resolveRunnerSelection(workspaceAccess = "read_only", networkAccess = "disabled") {
+  if (
+    workspaceAccess !== "read_only" &&
+    workspaceAccess !== "writable"
+  ) {
+    throw new Error(
+      `invalid workspace_access: expected "read_only" or "writable"`,
+    )
+  }
+
+  if (
+    networkAccess !== "disabled" &&
+    networkAccess !== "host"
+  ) {
+    throw new Error(
+      `invalid network_access: expected "disabled" or "host"`,
+    )
+  }
+
+  if (workspaceAccess === "writable" && networkAccess === "host") {
+    return {
+      agent: "opencode-orchestrator-runner-writable-network",
+      executionTool: "sandbox_run_network",
+    }
+  }
+
+  if (workspaceAccess === "writable") {
+    return {
+      agent: "opencode-orchestrator-runner-writable",
+      executionTool: "sandbox_run",
+    }
+  }
+
+  if (networkAccess === "host") {
+    return {
+      agent: "opencode-orchestrator-runner-network",
+      executionTool: "sandbox_run_network_ro",
+    }
+  }
+
+  return {
+    agent: "opencode-orchestrator-runner",
+    executionTool: "sandbox_run_ro",
+  }
+}
+
 export function createToolHandlers(run = runAgent) {
   return {
     scout: async (args, ctx) => {
@@ -1661,20 +1711,12 @@ export function createToolHandlers(run = runAgent) {
       try {
         const timeout = args.timeout_seconds ?? 900
         const workspaceAccess = args.workspace_access ?? "read_only"
+        const networkAccess = args.network_access ?? "disabled"
 
-        if (
-          workspaceAccess !== "read_only" &&
-          workspaceAccess !== "writable"
-        ) {
-          throw new Error(
-            `invalid workspace_access: expected "read_only" or "writable"`
-          )
-        }
-
-        const agent =
-          workspaceAccess === "writable"
-            ? "opencode-orchestrator-runner-writable"
-            : "opencode-orchestrator-runner"
+        const { agent, executionTool } = resolveRunnerSelection(
+          workspaceAccess,
+          networkAccess,
+        )
 
         const workspaceRules =
           workspaceAccess === "writable"
@@ -1686,10 +1728,21 @@ export function createToolHandlers(run = runAgent) {
                 "Do not modify workspace files or attempt repairs.",
               ]
 
+        const networkRules =
+          networkAccess === "host"
+            ? [
+                "Network access mode: host. The parent explicitly granted host network access; use it only for the requested command and do not fetch unrelated resources or perform additional investigation.",
+              ]
+            : [
+                "Network access mode: disabled. Network is unavailable in this sandbox; do not attempt external network access.",
+              ]
+
         const task = [
           "Execute and analyze one local command.",
           "",
           `Workspace access mode: ${workspaceAccess}.`,
+          `Network access mode: ${networkAccess}.`,
+          `Use exactly ${executionTool} for the requested command; no other execution tool is permitted.`,
           "Enforcement comes from the selected permission-scoped agent; this line is informational only.",
           "",
           "Command:",
@@ -1703,9 +1756,10 @@ export function createToolHandlers(run = runAgent) {
           "",
           `Maximum runtime: ${timeout} seconds.`,
           "",
-          "Run the command exactly once with sandbox_run.",
-          "Pass the requested maximum runtime to sandbox_run.",
+          `Run the command exactly once with ${executionTool}.`,
+          `Pass the requested maximum runtime to ${executionTool}.`,
           "If the initial result is insufficient, inspect the persisted output with sandbox_log.",
+          ...networkRules,
           ...workspaceRules,
           "Do not run replacement or follow-up substantive commands.",
           "Return a concise result containing the actual exit code, whether the objective/expected condition was met, and only the smallest useful diagnostic evidence.",
@@ -1806,7 +1860,7 @@ export function createServer() {
       title: "OpenCode Orchestrator Runner",
       description:
         "Run a potentially noisy local build, test, diagnostic, lint, typecheck, or log-producing command and return only a concise delegated-model analysis. " +
-        "The command runs in an isolated networkless sandbox with Git metadata protected. " +
+        "The command runs networkless by default in an isolated sandbox with Git metadata protected; host-network access is available only when the parent explicitly grants it. " +
         "Use this instead of running large-output commands directly in the root model.",
       inputSchema: z.object({
         cwd: z.string().min(1).describe(
@@ -1827,13 +1881,18 @@ export function createServer() {
         workspace_access: z.enum(["read_only", "writable"]).default("read_only").describe(
           "Workspace access mode: read_only delegates to the read-only runner agent, writable delegates to the writable runner agent"
         ),
+        network_access: z.enum(["disabled", "host"]).default("disabled").describe(
+          "Network access mode: disabled runs networkless, host grants parent-controlled host-network access"
+        ),
       }),
       annotations: {
         // Static and conservative: annotations cannot vary per call,
         // so keep the writable (least permissive) hints for both modes.
+        // openWorldHint is true because host-network access is reachable
+        // through explicit parent grant even though the default is closed.
         readOnlyHint: false,
         destructiveHint: true,
-        openWorldHint: false,
+        openWorldHint: true,
       },
     },
     handlers.runner,

@@ -32,6 +32,7 @@ import {
   resetBridgeStateForTests,
   resolveBridgeTimeoutMs,
   resolveCanonicalCwd,
+  resolveRunnerSelection,
   resolveServerVersion,
   resolveSessionWaitRefreshMs,
   runAgent as runAgentWithConfiguredBudget,
@@ -3029,6 +3030,39 @@ test("worker and writable runner conflict on the same worktree", async () => {
     )
   })
 
+  await withTempDir("bridge-writer-network-fallback-", async (dir) => {
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const { calls, client } = makeFakeClient({ wait: () => gate })
+    const base = { client, model: stubModel, timeoutMs: 10000 }
+
+    const writableNetworkFirst = runAgent(
+      dir,
+      "writable network task",
+      "opencode-orchestrator-runner-writable-network",
+      "runner",
+      base,
+    )
+
+    await waitFor(() => callNames(calls, "wait").length >= 1)
+
+    const createdBefore = callNames(calls, "create").length
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "worker task",
+        "opencode-orchestrator-worker",
+        "worker",
+        base,
+      ),
+      /already running/,
+    )
+    assert.equal(callNames(calls, "create").length, createdBefore)
+
+    release()
+    assert.equal(await writableNetworkFirst, "hello")
+  })
+
   resetBridgeStateForTests()
 })
 
@@ -3269,4 +3303,292 @@ test("runner instructions are mode-specific about workspace writes", async () =>
   assert.doesNotMatch(writableTask, /Do not modify source files/)
   assert.equal(captured[2], "opencode-orchestrator-runner-writable")
   assert.equal(captured[4].workspaceAccess, "writable")
+})
+
+test("resolveRunnerSelection maps all four workspace/network combinations", () => {
+  assert.deepEqual(
+    resolveRunnerSelection("read_only", "disabled"),
+    { agent: "opencode-orchestrator-runner", executionTool: "sandbox_run_ro" },
+  )
+  assert.deepEqual(
+    resolveRunnerSelection("writable", "disabled"),
+    { agent: "opencode-orchestrator-runner-writable", executionTool: "sandbox_run" },
+  )
+  assert.deepEqual(
+    resolveRunnerSelection("read_only", "host"),
+    { agent: "opencode-orchestrator-runner-network", executionTool: "sandbox_run_network_ro" },
+  )
+  assert.deepEqual(
+    resolveRunnerSelection("writable", "host"),
+    { agent: "opencode-orchestrator-runner-writable-network", executionTool: "sandbox_run_network" },
+  )
+  assert.deepEqual(
+    resolveRunnerSelection(undefined, undefined),
+    { agent: "opencode-orchestrator-runner", executionTool: "sandbox_run_ro" },
+  )
+  assert.throws(() => resolveRunnerSelection("read_only", "bogus"), /invalid network_access/)
+  assert.throws(() => resolveRunnerSelection("read_only", "HOST"), /invalid network_access/)
+  assert.throws(() => resolveRunnerSelection("bogus", "disabled"), /invalid workspace_access/)
+})
+
+test("runner handler defaults omitted network_access to disabled behavior", async () => {
+  let captured
+
+  const handlers = createToolHandlers(async (...args) => {
+    captured = args
+    return "done"
+  })
+
+  const before = createToolHandlers(async (...args) => {
+    captured = args
+    return "done"
+  })
+
+  await handlers.runner(
+    { cwd: "/tmp/work", command: "npm test", objective: "check tests" },
+    undefined,
+  )
+
+  const omittedTask = captured[1]
+  const omittedAgent = captured[2]
+
+  await before.runner(
+    {
+      cwd: "/tmp/work",
+      command: "npm test",
+      objective: "check tests",
+      workspace_access: "read_only",
+      network_access: "disabled",
+    },
+    undefined,
+  )
+
+  assert.equal(omittedAgent, "opencode-orchestrator-runner")
+  assert.equal(omittedAgent, captured[2])
+  assert.match(omittedTask, /Network access mode: disabled\./)
+  assert.match(omittedTask, /Network is unavailable/)
+  assert.match(omittedTask, /Use exactly sandbox_run_ro/)
+  assert.match(omittedTask, /Run the command exactly once with sandbox_run_ro\./)
+  assert.match(omittedTask, /Pass the requested maximum runtime to sandbox_run_ro\./)
+})
+
+test("runner handler rejects invalid network_access before session creation", async () => {
+  let called = false
+
+  const handlers = createToolHandlers(async () => {
+    called = true
+    return "done"
+  })
+
+  for (const bad of ["bogus", "HOST", "", "host ", "none"]) {
+    const result = await handlers.runner(
+      {
+        cwd: "/tmp/work",
+        command: "npm test",
+        objective: "check tests",
+        network_access: bad,
+      },
+      undefined,
+    )
+
+    assert.equal(result.isError, true)
+    assert.match(result.content[0].text, /invalid network_access/)
+  }
+
+  assert.equal(called, false)
+})
+
+test("runner handler selects the exact agent for all four combinations", async () => {
+  const cases = [
+    ["read_only", "disabled", "opencode-orchestrator-runner", "sandbox_run_ro"],
+    ["writable", "disabled", "opencode-orchestrator-runner-writable", "sandbox_run"],
+    ["read_only", "host", "opencode-orchestrator-runner-network", "sandbox_run_network_ro"],
+    ["writable", "host", "opencode-orchestrator-runner-writable-network", "sandbox_run_network"],
+  ]
+
+  for (const [workspaceAccess, networkAccess, agent, tool] of cases) {
+    let captured
+
+    const handlers = createToolHandlers(async (...args) => {
+      captured = args
+      return "done"
+    })
+
+    const result = await handlers.runner(
+      {
+        cwd: "/tmp/work",
+        command: "npm test",
+        objective: "check tests",
+        workspace_access: workspaceAccess,
+        network_access: networkAccess,
+      },
+      undefined,
+    )
+
+    assert.deepEqual(result, { content: [{ type: "text", text: "done" }] })
+    assert.equal(captured[2], agent, `${workspaceAccess}+${networkAccess}`)
+    assert.match(captured[1], new RegExp(`Workspace access mode: ${workspaceAccess}\\.`))
+    assert.match(captured[1], new RegExp(`Network access mode: ${networkAccess}\\.`))
+    assert.match(captured[1], new RegExp(`Use exactly ${tool}`))
+    assert.match(captured[1], new RegExp(`Run the command exactly once with ${tool}\\.`))
+
+    if (networkAccess === "host") {
+      assert.match(captured[1], /parent explicitly granted host network access/)
+      assert.match(captured[1], /do not fetch unrelated resources/)
+    } else {
+      assert.match(captured[1], /Network is unavailable/)
+    }
+  }
+})
+
+test("network access alone never takes the writer lock", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-runner-host-", async (dir) => {
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const { calls, client } = makeFakeClient({ wait: () => gate })
+    const base = { client, model: stubModel, timeoutMs: 10000 }
+
+    const workerFirst = runAgent(
+      dir,
+      "worker task",
+      "opencode-orchestrator-worker",
+      "worker",
+      base,
+    )
+
+    await waitFor(() => callNames(calls, "wait").length >= 1)
+
+    const readOnlyHost = runAgent(
+      dir,
+      "read-only host task",
+      "opencode-orchestrator-runner-network",
+      "runner",
+      { ...base, workspaceAccess: "read_only" },
+    )
+
+    await waitFor(() => callNames(calls, "wait").length >= 2)
+
+    release()
+
+    assert.deepEqual(
+      await Promise.all([workerFirst, readOnlyHost]),
+      ["hello", "hello"],
+    )
+  })
+
+  await withTempDir("bridge-runner-host-w-", async (dir) => {
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const { calls, client } = makeFakeClient({ wait: () => gate })
+    const base = { client, model: stubModel, timeoutMs: 10000 }
+
+    const writableHostFirst = runAgent(
+      dir,
+      "writable host task",
+      "opencode-orchestrator-runner-writable-network",
+      "runner",
+      { ...base, workspaceAccess: "writable" },
+    )
+
+    await waitFor(() => callNames(calls, "wait").length >= 1)
+
+    const createdBefore = callNames(calls, "create").length
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "worker task",
+        "opencode-orchestrator-worker",
+        "worker",
+        base,
+      ),
+      /already running/,
+    )
+
+    assert.equal(callNames(calls, "create").length, createdBefore)
+
+    release()
+    assert.equal(await writableHostFirst, "hello")
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("runner tool annotation is statically open-world with conservative write hints", async () => {
+  const server = createServer()
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+
+  await server.connect(serverTransport)
+
+  const client = new Client({
+    name: "bridge-runtime-runner-annotation-test",
+    version: "0.0.0",
+  })
+
+  await client.connect(clientTransport)
+
+  try {
+    const { tools } = await client.listTools()
+    const runner = tools.find((tool) => tool.name === "runner")
+
+    assert.ok(runner)
+    assert.equal(runner.annotations.readOnlyHint, false)
+    assert.equal(runner.annotations.destructiveHint, true)
+    assert.equal(runner.annotations.openWorldHint, true)
+
+    const schema = runner.inputSchema
+    assert.ok(schema.properties.network_access)
+    assert.deepEqual(schema.properties.network_access.enum, ["disabled", "host"])
+    assert.equal(schema.properties.network_access.default, "disabled")
+  } finally {
+    await client.close()
+    await server.close()
+  }
+})
+
+test("runner schema rejects an invalid network_access value", async () => {
+  const server = createServer()
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+
+  await server.connect(serverTransport)
+
+  const client = new Client({
+    name: "bridge-runtime-network-access-test",
+    version: "0.0.0",
+  })
+
+  await client.connect(clientTransport)
+
+  try {
+    let outcome
+
+    try {
+      outcome = await client.callTool({
+        name: "runner",
+        arguments: {
+          cwd: "/tmp/work",
+          command: "npm test",
+          objective: "check tests",
+          network_access: "bogus",
+        },
+      })
+    } catch (error) {
+      assert.match(String(error?.message ?? error), /network_access/i)
+      return
+    }
+
+    assert.equal(outcome.isError, true)
+
+    const text = (outcome.content ?? [])
+      .filter((part) => part?.type === "text")
+      .map((part) => part.text)
+      .join("\n")
+
+    assert.match(text, /network_access/i)
+  } finally {
+    await client.close()
+    await server.close()
+  }
 })

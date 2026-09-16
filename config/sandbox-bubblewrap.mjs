@@ -29,6 +29,7 @@ import {
   realpathSync as fsRealpathSync,
   statSync as fsStatSync,
 } from "node:fs"
+import { isIP } from "node:net"
 
 import {
   delimiter as pathDelimiter,
@@ -40,6 +41,7 @@ import {
 } from "node:path"
 
 import {
+  normalizeSandboxNetworkAccess,
   sandboxIsolationArgv,
 } from "./sandbox-isolation.mjs"
 
@@ -55,6 +57,34 @@ export const SANDBOX_ETC_RO_BINDS = Object.freeze([
   "/etc/group",
   "/etc/localtime",
   "/etc/gitconfig",
+])
+
+/*
+ * Host-network support mounts: the only additional read-only mounts
+ * permitted when networkAccess is "host". Resolver/hosts files keep
+ * ordinary DNS behavior; the CA bundle/store keeps ordinary HTTPS CLI
+ * behavior. Never broadened to /etc, /etc/ssl, /etc/ssl/private, HOME,
+ * or a parent fallback.
+ */
+export const SANDBOX_NETWORK_RESOLVER_BINDS = Object.freeze([
+  "/etc/resolv.conf",
+  "/etc/hosts",
+])
+
+export const SANDBOX_NETWORK_CA_FILE_CANDIDATES = Object.freeze([
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/certs/ca-bundle.crt",
+  "/etc/ssl/cert.pem",
+  "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+  "/var/lib/ca-certificates/ca-bundle.pem",
+])
+
+export const SANDBOX_NETWORK_CA_DIR_CANDIDATES = Object.freeze([
+  "/etc/ssl/certs",
+  "/etc/pki/tls/certs",
+  "/etc/ca-certificates/extracted/cadir",
+  "/var/lib/ca-certificates/openssl",
 ])
 
 const SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT =
@@ -775,6 +805,280 @@ export function addSandboxRuntimeBinds(argv, roots) {
   }
 }
 
+function isForbiddenNetworkTarget(canonical, home) {
+  if (
+    canonical === "/etc" ||
+    canonical === "/etc/ssl" ||
+    canonical === "/etc/ssl/private" ||
+    canonical === "/etc/pki/private" ||
+    canonical === "/etc/pki/tls/private" ||
+    canonical === "/" ||
+    canonical === "/home" ||
+    canonical === "/tmp"
+  ) {
+    return true
+  }
+  if (isWithin("/etc/ssl/private", canonical)) return true
+  if (isWithin("/etc/pki/private", canonical)) return true
+  if (isWithin("/etc/pki/tls/private", canonical)) return true
+  if (SANDBOX_TOOLCHAIN_FORBIDDEN_EXACT.has(canonical)) return true
+  if (!home) return false
+  if (canonical === home || isWithin(home, canonical)) return true
+  return false
+}
+
+function isAllowedResolverCanonical(source, canonical) {
+  if (source === "/etc/hosts") return canonical === source
+  if (source !== "/etc/resolv.conf") return false
+  if (canonical === source) return true
+  return [
+    "/run/systemd/resolve",
+    "/run/NetworkManager",
+    "/run/resolvconf",
+    "/run/connman",
+    "/etc/resolvconf/run",
+  ].some((root) => isWithin(root, canonical))
+}
+
+function isAllowedCaCanonical(canonical) {
+  if (
+    isWithin("/etc/ssl/private", canonical) ||
+    isWithin("/etc/pki/private", canonical) ||
+    isWithin("/etc/pki/tls/private", canonical)
+  ) {
+    return false
+  }
+  return (
+    canonical === "/etc/ssl/cert.pem" ||
+    isWithin("/etc/ssl/certs", canonical) ||
+    isWithin("/etc/pki/tls/certs", canonical) ||
+    isWithin("/etc/pki/ca-trust/extracted", canonical) ||
+    isWithin("/usr/share/ca-certificates", canonical) ||
+    isWithin("/etc/ca-certificates/extracted", canonical) ||
+    canonical === "/var/lib/ca-certificates/ca-bundle.pem" ||
+    isWithin("/var/lib/ca-certificates/openssl", canonical)
+  )
+}
+
+/*
+ * Native/hash trust directories that are usable on their own (OpenSSL
+ * hashed stores). Compatibility-only directories (symlink farms whose
+ * targets are not themselves mounted) must not satisfy the usable-trust
+ * predicate alone: success requires a validated regular bundle file, or
+ * a mounted native/hash directory. Explicit native candidates suffice;
+ * no broad directory traversal is performed.
+ */
+function isNativeCaTrustDirCanonical(canonical) {
+  return (
+    isWithin("/etc/ssl/certs", canonical) ||
+    isWithin("/etc/pki/tls/certs", canonical) ||
+    isWithin("/etc/ca-certificates/extracted/cadir", canonical) ||
+    isWithin("/var/lib/ca-certificates/openssl", canonical)
+  )
+}
+
+/*
+ * Resolve the narrow read-only network-support mounts for host mode.
+ * Returns narrow [{ source, target }] read-only mounts. Most mounts preserve
+ * the host path (target === source); a symlink-backed CA candidate whose
+ * lexical parent is not mounted instead uses its validated canonical file as
+ * source and the lexical candidate as target. Candidates are resolved via
+ * realpath and validated for safe location and file type. A usable resolver
+ * configuration and at least one usable CA trust source (file or directory)
+ * are both required; host mode fails
+ * closed when either capability is unavailable. /etc/hosts remains
+ * optional because ordinary DNS does not depend on it.
+ */
+export function resolveSandboxNetworkMounts(options = {}) {
+  const existsFn = options.existsSync ?? fsExistsSync
+  const readFileFn = options.readFileSync ?? fsReadFileSync
+  const realpathFn = options.realpathSync ?? fsRealpathSync
+  const statFn = options.statSync ?? fsStatSync
+  const env = options.env ?? process.env
+  const home = env?.HOME
+  let canonicalHome
+  try {
+    canonicalHome = home ? realpathFn(home) : undefined
+  } catch {
+    canonicalHome = undefined
+  }
+  const mounts = []
+  const seen = new Set()
+  let resolverFound = false
+
+  const pushMount = (source, target = source) => {
+    if (seen.has(`${source}\0${target}`)) return
+    seen.add(`${source}\0${target}`)
+    mounts.push({ source, target })
+  }
+
+  for (const source of SANDBOX_NETWORK_RESOLVER_BINDS) {
+    let present = false
+    try {
+      present = existsFn(source)
+    } catch {
+      present = false
+    }
+    if (!present) continue
+    let canonical
+    try {
+      canonical = realpathFn(source)
+    } catch {
+      continue
+    }
+    if (!isAbsolute(canonical)) continue
+    let info
+    try {
+      info = statFn(canonical)
+    } catch {
+      continue
+    }
+    if (!info.isFile || !info.isFile()) continue
+    if (!isAllowedResolverCanonical(source, canonical)) continue
+    if (isForbiddenNetworkTarget(canonical, canonicalHome)) continue
+    if (canonical !== source) {
+      // Resolved target must itself be the validated file; bind the
+      // original path only when the backing file is safe. bwrap
+      // --ro-bind follows the host path, so both must be safe.
+      if (isForbiddenNetworkTarget(source, canonicalHome)) continue
+    }
+    if (source === "/etc/resolv.conf") {
+      let contents
+      try {
+        contents = readFileFn(source, "utf8")
+      } catch {
+        continue
+      }
+      if (
+        typeof contents !== "string" ||
+        contents.length > 64 * 1024 ||
+        contents.includes("\0")
+      ) {
+        continue
+      }
+      const hasNameserver = contents.split("\n").some((line) => {
+        const directive = line.replace(/[#;].*$/, "").trim().split(/\s+/)
+        if (directive[0] !== "nameserver" || directive.length !== 2) {
+          return false
+        }
+        return isIP(directive[1].split("%", 1)[0]) !== 0
+      })
+      if (!hasNameserver) continue
+    }
+    pushMount(source)
+    if (source === "/etc/resolv.conf") resolverFound = true
+  }
+
+  if (!resolverFound) {
+    throw new Error("no usable resolver configuration for host networking")
+  }
+
+  let usableTrustFound = false
+  const emittedCaDirs = new Set()
+  const considerCa = (source, kind) => {
+    let present = false
+    try {
+      present = existsFn(source)
+    } catch {
+      present = false
+    }
+    if (!present) return
+    let canonical
+    try {
+      canonical = realpathFn(source)
+    } catch {
+      return
+    }
+    if (!isAbsolute(canonical)) return
+    let info
+    try {
+      info = statFn(canonical)
+    } catch {
+      return
+    }
+    if (kind === "file") {
+      if (!info.isFile || !info.isFile()) return
+    } else {
+      if (!info.isDirectory || !info.isDirectory()) return
+    }
+    if (canonical === "/etc" || canonical === "/etc/ssl") return
+    if (!isAllowedCaCanonical(canonical)) return
+    if (isForbiddenNetworkTarget(canonical, canonicalHome)) return
+    if (kind === "file" && canonical !== source) {
+      // Symlink-backed CA file. When the lexical parent directory is itself
+      // an approved CA directory that was actually mounted (notably
+      // Fedora/RHEL's /etc/pki/tls/certs/ca-bundle.crt), never bind onto
+      // the lexical symlink destination -- Bubblewrap 0.12.0 rejects that.
+      // Keep the validated symlink-bearing parent directory at its lexical
+      // destination and bind the validated canonical regular file at its
+      // canonical destination so the preserved symlink resolves.
+      // Otherwise (notably /etc/ssl/cert.pem whose lexical parent /etc/ssl
+      // is intentionally synthetic/not directory-bound), the lexical path
+      // would otherwise stay absent: bind the validated canonical regular
+      // file directly onto the exact lexical candidate path. Never source
+      // from the lexical symlink and never broadly bind the parent.
+      if (isForbiddenNetworkTarget(source, canonicalHome)) return
+      if (emittedCaDirs.has(dirname(source))) {
+        pushMount(canonical, canonical)
+      } else {
+        pushMount(canonical, source)
+      }
+      usableTrustFound = true
+      return
+    }
+    if (kind === "dir") {
+      // Directory symlinks: never mount onto the lexical symlink
+      // destination. Mount the validated canonical directory at its
+      // canonical destination so preserved symlinks resolve, and record
+      // the lexical parent as emitted for symlink-backed file handling.
+      // Only native/hash trust directories count toward usable trust;
+      // compatibility-only directories alone fail closed.
+      if (canonical !== source) {
+        if (isForbiddenNetworkTarget(source, canonicalHome)) return
+        pushMount(canonical, canonical)
+        emittedCaDirs.add(source)
+        if (isNativeCaTrustDirCanonical(canonical)) {
+          usableTrustFound = true
+        }
+        return
+      }
+      pushMount(source)
+      emittedCaDirs.add(source)
+      if (isNativeCaTrustDirCanonical(canonical)) {
+        usableTrustFound = true
+      }
+      return
+    }
+    pushMount(source)
+    usableTrustFound = true
+  }
+
+  // Bubblewrap processes mounts in command-line order. Bind directories
+  // before files so the preserved lexical CA directory is already in
+  // place when the canonical trust file it links to is mounted
+  // (notably Fedora/RHEL's symlink-backed
+  // /etc/pki/tls/certs/ca-bundle.crt layout).
+  for (const source of SANDBOX_NETWORK_CA_DIR_CANDIDATES) {
+    considerCa(source, "dir")
+  }
+  for (const source of SANDBOX_NETWORK_CA_FILE_CANDIDATES) {
+    considerCa(source, "file")
+  }
+
+  if (!usableTrustFound) {
+    throw new Error("no usable CA trust source for host networking")
+  }
+
+  return mounts
+}
+
+function addSandboxNetworkBinds(argv, mounts) {
+  for (const mount of mounts) {
+    ensureEmptyAncestorDirs(argv, mount.target)
+    argv.push("--ro-bind", mount.source, mount.target)
+  }
+}
+
 function validateCanonicalRoot(entry, home, realpathFn, statFn) {
   let canonical
 
@@ -910,10 +1214,14 @@ export function buildBaseSandboxArgv(
   options = {},
 ) {
   const existsFn = options.existsSync ?? fsExistsSync
+  const readFileFn = options.readFileSync ?? fsReadFileSync
   const lstatFn = options.lstatSync ?? fsLstatSync
   const realpathFn = options.realpathSync ?? fsRealpathSync
   const statFn = options.statSync ?? fsStatSync
   const readonlyWorkspace = options.readonlyWorkspace === true
+  const networkAccess = normalizeSandboxNetworkAccess(
+    options.networkAccess,
+  )
   const toolchainDirs = options.toolchainDirs ?? []
   const runtime = options.runtime ?? {
     mountRoots: [],
@@ -931,7 +1239,7 @@ export function buildBaseSandboxArgv(
   const argv = [
     SANDBOX_BWRAP_BIN,
 
-    ...sandboxIsolationArgv(),
+    ...sandboxIsolationArgv({ networkAccess }),
 
     "--ro-bind", "/usr", "/usr",
 
@@ -1082,6 +1390,19 @@ export function buildBaseSandboxArgv(
 
   for (const path of SANDBOX_ETC_RO_BINDS) {
     roBindIfExists(argv, path, existsFn)
+  }
+
+  if (networkAccess === "host") {
+    addSandboxNetworkBinds(
+      argv,
+      resolveSandboxNetworkMounts({
+        existsSync: existsFn,
+        readFileSync: readFileFn,
+        realpathSync: realpathFn,
+        statSync: statFn,
+        env: options.env,
+      }),
+    )
   }
 
   const mountRoots = [...new Set([

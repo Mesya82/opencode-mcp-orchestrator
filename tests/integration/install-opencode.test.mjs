@@ -118,6 +118,17 @@ test("installer renders default and custom step-limit profiles", () => {
       installedAgent(testRoot, "runner-writable"),
       /by step 32 of 40/,
     )
+    for (const role of ["runner-network", "runner-writable-network"]) {
+      assert.match(installedAgent(testRoot, role), /^steps: 40$/m)
+      assert.match(
+        installedAgent(testRoot, role),
+        /at most 40 model steps/,
+      )
+      assert.match(
+        installedAgent(testRoot, role),
+        /by step 32 of 40/,
+      )
+    }
     assert.match(
       installedPlugin(testRoot),
       /opencode_orchestrator_muse_final_tool_choice_omitted/,
@@ -156,6 +167,17 @@ test("installer renders default and custom step-limit profiles", () => {
       installedAgent(testRoot, "runner-writable"),
       /by step 38 of 48/,
     )
+    for (const role of ["runner-network", "runner-writable-network"]) {
+      assert.match(installedAgent(testRoot, role), /^steps: 48$/m)
+      assert.match(
+        installedAgent(testRoot, role),
+        /at most 48 model steps/,
+      )
+      assert.match(
+        installedAgent(testRoot, role),
+        /by step 38 of 48/,
+      )
+    }
   } finally {
     rmSync(
       testRoot,

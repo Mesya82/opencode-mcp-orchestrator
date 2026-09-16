@@ -109,6 +109,8 @@ test("dist public files use explicit 0644", () => {
     "opencode/agents/opencode-orchestrator-worker.md",
     "opencode/agents/opencode-orchestrator-runner.md",
     "opencode/agents/opencode-orchestrator-runner-writable.md",
+    "opencode/agents/opencode-orchestrator-runner-network.md",
+    "opencode/agents/opencode-orchestrator-runner-writable-network.md",
     "skills/orchestrate/SKILL.md",
   ]
 
@@ -116,6 +118,19 @@ test("dist public files use explicit 0644", () => {
     const path = resolve(dist, relative)
     assert.ok(existsSync(path), `missing ${relative}`)
     assert.equal(modeOf(path), 0o644, `${relative}: ${modeOf(path).toString(8)}`)
+  }
+})
+
+test("dist ships all four runner agent definitions", () => {
+  if (!hasDist()) return
+
+  for (const relative of [
+    "opencode/agents/opencode-orchestrator-runner.md",
+    "opencode/agents/opencode-orchestrator-runner-writable.md",
+    "opencode/agents/opencode-orchestrator-runner-network.md",
+    "opencode/agents/opencode-orchestrator-runner-writable-network.md",
+  ]) {
+    assert.ok(existsSync(resolve(dist, relative)), `missing ${relative}`)
   }
 })
 

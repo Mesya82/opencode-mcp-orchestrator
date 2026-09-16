@@ -357,6 +357,14 @@ for (const { relative, role } of [
     role: "runner",
   },
   {
+    relative: "agents/opencode-orchestrator-runner-network.md",
+    role: "runner",
+  },
+  {
+    relative: "agents/opencode-orchestrator-runner-writable-network.md",
+    role: "runner",
+  },
+  {
     relative: "plugins/opencode-mcp-orchestrator/index.ts",
   },
 ]) {

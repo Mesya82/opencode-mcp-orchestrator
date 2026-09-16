@@ -41,6 +41,7 @@ RUN apt-get update \
     git \
     jq \
     libcap2 \
+    openssl \
     python3 \
     unzip \
   && rm -rf /var/lib/apt/lists/*
@@ -50,10 +51,98 @@ COPY --from=bwrap-build /bwrap-out/usr/bin/bwrap /usr/bin/bwrap
 RUN /usr/bin/bwrap --version \
   && test "$(/usr/bin/bwrap --version)" = "bubblewrap 0.12.0"
 
+# Exercise the Fedora/RHEL legacy trust layout through the production argv:
+# the lexical bundle is a symlink whose canonical target lives outside the
+# symlink-bearing directory.
+RUN mkdir -p /etc/pki/tls/certs /etc/pki/ca-trust/extracted/pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+  && ln -s /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem \
+    /etc/pki/tls/certs/ca-bundle.crt \
+  && test "$(readlink -f /etc/pki/tls/certs/ca-bundle.crt)" \
+    = /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+
+# Exercise the synthetic-parent symlink shape: /etc/ssl/cert.pem is a
+# symlink to an allowed canonical trust file while /etc/ssl itself is never
+# directory-bound, so production must bind the canonical file directly onto
+# the lexical path.
+RUN ln -sf certs/ca-certificates.crt /etc/ssl/cert.pem \
+  && test -L /etc/ssl/cert.pem \
+  && test "$(readlink -f /etc/ssl/cert.pem)" \
+    = /etc/ssl/certs/ca-certificates.crt
+
+# Exercise the Arch extracted trust layout through narrow binds: the native
+# extracted bundle plus the native hashed cadir, with an /etc/ssl
+# compatibility symlink resolving into the extracted sources.
+RUN mkdir -p /etc/ca-certificates/extracted/cadir \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+  && ln -sf /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+    /etc/ssl/certs/ca-bundle.crt \
+  && test "$(readlink -f /etc/ssl/certs/ca-bundle.crt)" \
+    = /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/ca-certificates/extracted/cadir/ca-certificates.crt \
+  && test -f /etc/ca-certificates/extracted/tls-ca-bundle.pem
+
+# Exercise the SUSE generated trust layout through narrow binds only: the
+# bundle plus the openssl hashed store at their actual /var/lib paths.
+# Never bind /var or /var/lib broadly.
+RUN mkdir -p /var/lib/ca-certificates/openssl \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /var/lib/ca-certificates/ca-bundle.pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /var/lib/ca-certificates/openssl/ca-certificates.crt \
+  && test -f /var/lib/ca-certificates/ca-bundle.pem \
+  && test -f /var/lib/ca-certificates/openssl/ca-certificates.crt
+
 RUN useradd \
   --create-home \
   --shell /bin/bash \
   tester
+
+# Deterministic E2E PKI for the dedicated test hostname. Generated once at
+# image build (no network): a test CA trusted through the system bundle plus
+# a server cert whose SAN matches E2E_TEST_HOSTNAME. The runner network E2E
+# serves HTTPS with this cert and verifies it inside the sandbox through the
+# same narrowly mounted CA mechanism production uses.
+ENV E2E_TEST_HOSTNAME=e2e-hostmode.test
+
+RUN mkdir -p /e2e/certs \
+  && openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+    -addext "basicConstraints=critical,CA:true" \
+    -addext "keyUsage=critical,keyCertSign,cRLSign" \
+    -keyout /e2e/certs/test-ca.key -out /e2e/certs/test-ca.crt \
+    -subj "/CN=e2e-test-ca" \
+  && openssl req -newkey rsa:2048 -nodes \
+    -keyout /e2e/certs/server.key -out /e2e/certs/server.csr \
+    -subj "/CN=${E2E_TEST_HOSTNAME}" \
+  && printf 'subjectAltName=DNS:%s\nextendedKeyUsage=serverAuth\nkeyUsage=digitalSignature,keyEncipherment\n' "$E2E_TEST_HOSTNAME" \
+    > /e2e/certs/server-san.ext \
+  && openssl x509 -req -sha256 -days 3650 \
+    -in /e2e/certs/server.csr \
+    -CA /e2e/certs/test-ca.crt -CAkey /e2e/certs/test-ca.key -CAcreateserial \
+    -extfile /e2e/certs/server-san.ext \
+    -out /e2e/certs/server.crt \
+  && rm -f /e2e/certs/server.csr /e2e/certs/test-ca.srl \
+  && cp /e2e/certs/test-ca.crt /usr/local/share/ca-certificates/e2e-test-ca.crt \
+  && update-ca-certificates \
+  && openssl x509 -in /e2e/certs/server.crt -noout -ext subjectAltName \
+  && openssl verify -CAfile /etc/ssl/certs/ca-certificates.crt /e2e/certs/server.crt \
+  && chown -R tester:tester /e2e/certs \
+  && chmod 644 /e2e/certs/server.crt /e2e/certs/test-ca.crt \
+  && chmod 600 /e2e/certs/server.key /e2e/certs/test-ca.key
+
+# Refresh Arch/SUSE bundles after the test CA is trusted so verification
+# through those narrow layouts succeeds deterministically.
+RUN cp /etc/ssl/certs/ca-certificates.crt \
+    /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+  && cp /etc/ssl/certs/ca-certificates.crt \
+    /var/lib/ca-certificates/ca-bundle.pem \
+  && openssl verify -CAfile /etc/ca-certificates/extracted/tls-ca-bundle.pem \
+    /e2e/certs/server.crt \
+  && openssl verify -CAfile /var/lib/ca-certificates/ca-bundle.pem \
+    /e2e/certs/server.crt
 
 USER tester
 
@@ -74,6 +163,14 @@ COPY --chown=tester:tester \
 COPY --chown=tester:tester \
   tests/e2e/session-wait-refresh-probe.mjs \
   /e2e/session-wait-refresh-probe.mjs
+
+COPY --chown=tester:tester \
+  tests/e2e/network-access.mjs \
+  /e2e/network-access.mjs
+
+COPY --chown=tester:tester \
+  tests/e2e/network-run.sh \
+  /e2e/network-run.sh
 
 COPY --chown=tester:tester \
   tests/unit/linked-git-worktree.test.mjs \

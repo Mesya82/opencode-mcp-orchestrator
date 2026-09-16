@@ -45,7 +45,26 @@ The intended delegated-command properties are:
 - `writable` must be explicitly selected and uses a separate
   permission-scoped agent
 - `.git` metadata remains protected
-- outbound command network access is disabled
+- outbound command network access is disabled by default
+  (`network_access: "disabled"`); `"host"` must be explicitly selected,
+  only when the exact command and repository code are trusted, and uses a
+  separate permission-scoped agent plus execution tool
+  (`sandbox_run_ro`, `sandbox_run`, `sandbox_run_network_ro`,
+  `sandbox_run_network`)
+- `workspace_access` and `network_access` are independent, giving four
+  combinations (`read_only`/`writable` × `disabled`/`host`)
+- host networking shares the host network namespace: broader than Internet
+  access, it may reach Internet, LAN, link-local, and loopback addresses
+  plus applicable namespace-scoped abstract Unix sockets, and can
+  exfiltrate sandbox-visible data; read-only mode prevents writes, not
+  exfiltration
+- host mode adds only enumerated read-only `/etc/resolv.conf`,
+  `/etc/hosts`, and CA trust source mounts; host HOME, host credential files,
+  and inherited credential environment variables are not exposed,
+  `--clearenv` remains in effect, and proxy variables are not inherited;
+  reachable host-network endpoints may themselves expose sensitive data or
+  credentials depending on host configuration; host-mode construction fails
+  closed without both a validated resolver configuration and a CA trust source
 - large command output is persisted and analyzed inside the delegated flow
   rather than copied wholesale into the parent context
 - persisted Runner logs may contain command output; see
@@ -68,8 +87,10 @@ They should never be placed:
 Worker and Runner are not intended to perform Git-mutating operations.
 
 Prevention: the sandbox mounts Git metadata read-only and structured tool
-permissions deny Git paths, while delegated shells have no outbound network
-and no host credential or home-directory access.
+permissions deny Git paths. Delegated shells have no outbound network by
+default; explicitly host-enabled Runner shells share the host network
+namespace. Host HOME, host credential files, and inherited credential
+environment variables are not exposed.
 
 Detection only: Runner and worker flows also report a Git status delta
 before/after execution. That report observes workspace changes; it does not
@@ -89,7 +110,7 @@ branch operations, and similar repository-state changes.
 
 ## Network isolation
 
-Network isolation applies to delegated commands.
+Network isolation applies to delegated commands; the default is networkless.
 
 The OpenCode process itself necessarily retains network access when using a
 remote model provider.
@@ -97,7 +118,19 @@ remote model provider.
 Therefore:
 
     OpenCode/provider traffic      allowed
-    delegated local shell traffic  blocked
+    delegated local shell traffic  blocked by default
+
+Runner host networking (`network_access: "host"`) is an explicit
+capability escalation: it shares the host network namespace and is broader
+than Internet access (Internet, LAN, link-local, loopback, and applicable
+namespace-scoped abstract Unix sockets), with exfiltration risk for
+sandbox-visible data. Filesystem protections otherwise remain; only the
+enumerated resolver/hosts/CA trust source mounts are added. Host HOME, host
+credential files, and inherited credential environment variables are not
+exposed, and proxy variables are not inherited. Reachable host-network
+endpoints may themselves expose sensitive data or credentials depending on
+host configuration. `sandbox_shell` and the Doctor probes remain networkless.
+There are no hostname allowlists or selective egress controls.
 
 ## High-risk operations
 

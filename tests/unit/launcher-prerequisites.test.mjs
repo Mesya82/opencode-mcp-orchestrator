@@ -617,6 +617,8 @@ test("doctor --no-sandbox-probes reports readiness unverified when other checks 
       ["agents/opencode-orchestrator-worker.md", 32],
       ["agents/opencode-orchestrator-runner.md", 40],
       ["agents/opencode-orchestrator-runner-writable.md", 40],
+      ["agents/opencode-orchestrator-runner-network.md", 40],
+      ["agents/opencode-orchestrator-runner-writable-network.md", 40],
     ]
     for (const [relative, limit] of agentDefs) {
       const target = join(configHome, "opencode", relative)
