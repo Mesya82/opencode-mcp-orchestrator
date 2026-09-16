@@ -41,7 +41,7 @@ jobs:
           E2E_VERSION: 0.0.0-e2e
         run: |
           set -o pipefail
-          npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e.log"
+          bash tests/e2e/github-userns.sh npm run test:e2e 2>&1 | tee "$RUNNER_TEMP/e2e.log"
 
       - name: Upload E2E log on failure
         if: failure()

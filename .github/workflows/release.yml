@@ -61,7 +61,7 @@ jobs:
           E2E_CONTAINER_RUNTIME: docker
           E2E_VERSION: 0.0.0-release-e2e
           E2E_REPOSITORY: ${{ github.repository }}
-        run: npm run test:e2e
+        run: bash tests/e2e/github-userns.sh npm run test:e2e
 
       - name: Build runtime bundles
         run: npm run build

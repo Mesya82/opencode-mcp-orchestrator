@@ -50,6 +50,101 @@ test -f "$RELEASE_DIR/$ARCHIVE" || \
   fail "release archive missing: $ARCHIVE"
 
 echo
+echo "=== BUBBLEWRAP VERSION ==="
+
+BWRAP_VERSION="$(
+  /usr/bin/bwrap --version
+)"
+
+echo "Bubblewrap:"
+echo "  $BWRAP_VERSION"
+
+test "$BWRAP_VERSION" = "bubblewrap 0.12.0" || \
+  fail "expected bubblewrap 0.12.0 at /usr/bin/bwrap, got: $BWRAP_VERSION"
+
+echo BWRAP_0_12_0_OK
+
+echo
+echo "=== BUBBLEWRAP PREFLIGHT ==="
+
+# Nested namespaces must already be enabled by the disposable container
+# runtime (see tests/e2e/local.sh); no privileged/capability escalation here.
+/usr/bin/bwrap --die-with-parent --new-session --unshare-net --unshare-pid --unshare-ipc --unshare-uts --ro-bind /usr /usr --symlink usr/bin /bin --symlink usr/lib /lib --symlink usr/lib64 /lib64 --proc /proc --dev /dev --tmpfs /tmp --clearenv /bin/sh -c true
+echo NESTED_BWRAP_NETLESS_OK
+
+echo
+echo "=== LINKED WORKTREE REAL BWRAP ==="
+
+LINKED_LOG="/tmp/linked-worktree-bwrap-e2e.log"
+
+RUN_LINKED_BWRAP_TESTS=1 \
+  node \
+    --test \
+    --test-reporter=tap \
+    /e2e/tests/unit/linked-git-worktree.test.mjs \
+    >"$LINKED_LOG" \
+    2>&1
+
+LINKED_STATUS=$?
+
+cat "$LINKED_LOG"
+
+test "$LINKED_STATUS" -eq 0 || \
+  fail "linked worktree real bwrap test exited $LINKED_STATUS"
+
+if grep -Eq \
+  "^not ok" \
+  "$LINKED_LOG"; then
+  fail "linked worktree real bwrap test reported a failing case"
+fi
+
+grep -Fq \
+  "linked git real bubblewrap enforcement (RW and RO)" \
+  "$LINKED_LOG" || \
+  fail "linked worktree real bwrap enforcement case missing from output"
+
+if grep -F \
+  "linked git real bubblewrap enforcement (RW and RO)" \
+  "$LINKED_LOG" \
+  | grep -qi \
+    "# SKIP"; then
+  fail "linked worktree real bwrap enforcement case was skipped"
+fi
+
+grep -Fq \
+  "deterministic relative gitdir + commondir fixture resolves and mounts" \
+  "$LINKED_LOG" || \
+  fail "deterministic relative gitdir case missing from output"
+
+if grep -F \
+  "deterministic relative gitdir + commondir fixture resolves and mounts" \
+  "$LINKED_LOG" \
+  | grep -qi \
+    "# SKIP"; then
+  fail "deterministic relative gitdir case was skipped"
+fi
+
+SKIP_COUNT="$(
+  grep -ci \
+    "^ok.*# SKIP" \
+    "$LINKED_LOG" || true
+)"
+SKIP_COUNT="$(printf '%s' "$SKIP_COUNT" | tr -d '[:space:]')"
+test -n "$SKIP_COUNT" || SKIP_COUNT=0
+
+test "$SKIP_COUNT" -le 1 || \
+  fail "unexpected skips in linked worktree test: $SKIP_COUNT"
+
+if test "$SKIP_COUNT" -eq 1; then
+  grep -qi \
+    "relative-paths" \
+    "$LINKED_LOG" || \
+    fail "only the relative-paths case may skip on old Bookworm Git"
+fi
+
+echo LINKED_WORKTREE_BWRAP_E2E_OK
+
+echo
 echo "=== INSTALL LATEST CLIENTS ==="
 
 echo
