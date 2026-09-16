@@ -207,7 +207,7 @@ Runner does not own:
 - deployment
 - privileged networked operations
 
-Do not ask runner to deploy, publish, push, SSH, access cloud infrastructure, use unrestricted network access, or perform other privileged external actions.
+Do not ask runner to deploy, publish, push, SSH, access cloud infrastructure, or perform other privileged external actions. Host networking is permitted only by explicitly setting `network_access: "host"` for an exact trusted command under the rules above; it does not authorize any of those actions.
 
 If runner identifies a code problem that needs modification, Sol may subsequently delegate a bounded worker task.
 
