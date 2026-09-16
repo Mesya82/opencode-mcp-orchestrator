@@ -3030,6 +3030,39 @@ test("worker and writable runner conflict on the same worktree", async () => {
     )
   })
 
+  await withTempDir("bridge-writer-network-fallback-", async (dir) => {
+    let release
+    const gate = new Promise((resolve) => { release = resolve })
+    const { calls, client } = makeFakeClient({ wait: () => gate })
+    const base = { client, model: stubModel, timeoutMs: 10000 }
+
+    const writableNetworkFirst = runAgent(
+      dir,
+      "writable network task",
+      "opencode-orchestrator-runner-writable-network",
+      "runner",
+      base,
+    )
+
+    await waitFor(() => callNames(calls, "wait").length >= 1)
+
+    const createdBefore = callNames(calls, "create").length
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "worker task",
+        "opencode-orchestrator-worker",
+        "worker",
+        base,
+      ),
+      /already running/,
+    )
+    assert.equal(callNames(calls, "create").length, createdBefore)
+
+    release()
+    assert.equal(await writableNetworkFirst, "hello")
+  })
+
   resetBridgeStateForTests()
 })
 

@@ -449,8 +449,11 @@ addresses, plus applicable namespace-scoped abstract Unix sockets, and can
 exfiltrate sandbox-visible data. Read-only mode prevents workspace writes
 but does not prevent exfiltration. Host mode adds only enumerated
 read-only mounts for `/etc/resolv.conf`, `/etc/hosts`, and a CA trust
-source; it does not expose host HOME or credentials, `--clearenv` remains
-in effect, and proxy variables are not inherited. Host-mode construction
+source; it does not expose host HOME, host credential files, or inherited
+credential environment variables, `--clearenv` remains in effect, and proxy
+variables are not inherited. Reachable host-network endpoints may themselves
+expose sensitive data or credentials depending on host configuration.
+Host-mode construction
 fails closed unless both a validated resolver configuration and a CA trust
 source are available. `sandbox_shell` and the Doctor probes remain
 networkless. The Runner tool schema is
@@ -471,7 +474,9 @@ The delegated command environment has been designed and tested so that:
 - delegated shell commands have no outbound network access by default;
   Runner `network_access` defaults to `disabled` and host networking
   requires an explicit `"host"` grant
-- orchestrator/provider credentials are not exposed to delegated commands
+- orchestrator/provider credential files and inherited credential environment
+  variables are not exposed to delegated commands; host-enabled Runner commands
+  may reach endpoints that independently expose sensitive data or credentials
 - secret files outside the sandbox are not readable
 - Runner can persist and analyze large command logs without returning the full
   log to the parent model

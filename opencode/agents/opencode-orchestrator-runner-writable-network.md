@@ -62,7 +62,7 @@ Use sandbox_run_network for the requested command.
 sandbox_run_network:
 - runs locally in an isolated sandbox
 - has parent-granted host network access; use it only for the requested command and do not fetch unrelated resources or perform additional investigation
-- cannot access host credentials or host HOME
+- does not expose host HOME, host credential files, or inherited credential environment variables; host-network endpoints remain reachable and may themselves expose sensitive data or credentials depending on host configuration
 - has a writable repository workspace and may modify repository contents when the parent requests it
 - has read-only Git metadata
 - persists combined stdout/stderr outside model context

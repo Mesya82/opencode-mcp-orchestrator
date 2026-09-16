@@ -59,10 +59,12 @@ The intended delegated-command properties are:
   exfiltrate sandbox-visible data; read-only mode prevents writes, not
   exfiltration
 - host mode adds only enumerated read-only `/etc/resolv.conf`,
-  `/etc/hosts`, and CA trust source mounts; host HOME/credentials stay
-  inaccessible, `--clearenv` remains in effect, and proxy variables are not
-  inherited; host-mode construction fails closed without both a validated
-  resolver configuration and a CA trust source
+  `/etc/hosts`, and CA trust source mounts; host HOME, host credential files,
+  and inherited credential environment variables are not exposed,
+  `--clearenv` remains in effect, and proxy variables are not inherited;
+  reachable host-network endpoints may themselves expose sensitive data or
+  credentials depending on host configuration; host-mode construction fails
+  closed without both a validated resolver configuration and a CA trust source
 - large command output is persisted and analyzed inside the delegated flow
   rather than copied wholesale into the parent context
 - persisted Runner logs may contain command output; see
@@ -85,8 +87,10 @@ They should never be placed:
 Worker and Runner are not intended to perform Git-mutating operations.
 
 Prevention: the sandbox mounts Git metadata read-only and structured tool
-permissions deny Git paths, while delegated shells have no outbound network
-and no host credential or home-directory access.
+permissions deny Git paths. Delegated shells have no outbound network by
+default; explicitly host-enabled Runner shells share the host network
+namespace. Host HOME, host credential files, and inherited credential
+environment variables are not exposed.
 
 Detection only: Runner and worker flows also report a Git status delta
 before/after execution. That report observes workspace changes; it does not
@@ -121,10 +125,12 @@ capability escalation: it shares the host network namespace and is broader
 than Internet access (Internet, LAN, link-local, loopback, and applicable
 namespace-scoped abstract Unix sockets), with exfiltration risk for
 sandbox-visible data. Filesystem protections otherwise remain; only the
-enumerated resolver/hosts/CA trust source mounts are added, with no host
-HOME/credentials and no inherited proxy variables. `sandbox_shell` and the
-Doctor probes remain networkless. There are no hostname allowlists or
-selective egress controls.
+enumerated resolver/hosts/CA trust source mounts are added. Host HOME, host
+credential files, and inherited credential environment variables are not
+exposed, and proxy variables are not inherited. Reachable host-network
+endpoints may themselves expose sensitive data or credentials depending on
+host configuration. `sandbox_shell` and the Doctor probes remain networkless.
+There are no hostname allowlists or selective egress controls.
 
 ## High-risk operations
 

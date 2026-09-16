@@ -1136,6 +1136,7 @@ export function buildBaseSandboxArgv(
   options = {},
 ) {
   const existsFn = options.existsSync ?? fsExistsSync
+  const readFileFn = options.readFileSync ?? fsReadFileSync
   const lstatFn = options.lstatSync ?? fsLstatSync
   const realpathFn = options.realpathSync ?? fsRealpathSync
   const statFn = options.statSync ?? fsStatSync
@@ -1318,6 +1319,7 @@ export function buildBaseSandboxArgv(
       argv,
       resolveSandboxNetworkMounts({
         existsSync: existsFn,
+        readFileSync: readFileFn,
         realpathSync: realpathFn,
         statSync: statFn,
         env: options.env,

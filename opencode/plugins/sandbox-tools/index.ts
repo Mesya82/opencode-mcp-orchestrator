@@ -1758,7 +1758,7 @@ export default Plugin.define({
         description:
           "Run one potentially noisy local command in a hard sandbox with host network access. " +
           "Full combined stdout/stderr is persisted outside model context for later inspection with sandbox_log. " +
-          "Workspace is writable, Git metadata is read-only, host HOME and credentials are unavailable.",
+          "Workspace is writable and Git metadata is read-only. Host HOME, credential files, and inherited credential environment variables are not exposed; reachable host-network endpoints may expose sensitive data or credentials.",
 
         input: sandboxRunInputSchema(),
 
@@ -1795,7 +1795,7 @@ export default Plugin.define({
         description:
           "Run one potentially noisy local command in a hard sandbox with host network access and a read-only repository workspace. " +
           "Full combined stdout/stderr is persisted outside model context for later inspection with sandbox_log. " +
-          "Workspace is read-only, /runner-output and /tmp remain writable, Git metadata is read-only, host HOME and credentials are unavailable.",
+          "Workspace is read-only, /runner-output and /tmp remain writable, and Git metadata is read-only. Host HOME, credential files, and inherited credential environment variables are not exposed; reachable host-network endpoints may expose sensitive data or credentials.",
 
         input: sandboxRunInputSchema(),
 

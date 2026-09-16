@@ -146,6 +146,24 @@ test("disabled base argv is networkless; host adds narrow mounts only", () => {
   assert.ok(![...env.values()].join("\n").match(/proxy/i))
 })
 
+test("base argv forwards injected resolver reads in host mode", () => {
+  const wt = mkdtempSync(join(tmpdir(), "sandbox-net-"))
+  let resolverReads = 0
+  const fs = hostFs()
+  const argv = buildBaseSandboxArgv(wt, "/workspace", {
+    networkAccess: "host",
+    ...fs,
+    readFileSync: (path) => {
+      assert.equal(path, "/etc/resolv.conf")
+      resolverReads += 1
+      return "nameserver 192.0.2.53\n"
+    },
+  })
+
+  assert.equal(resolverReads, 1)
+  assert.equal(mountFlag(argv, "/etc/resolv.conf", "/etc/resolv.conf"), "--ro-bind")
+})
+
 test("host networking requires a validated resolver configuration", () => {
   assert.throws(
     () => resolveSandboxNetworkMounts(

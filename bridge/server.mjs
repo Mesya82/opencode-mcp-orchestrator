@@ -1218,7 +1218,8 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     (role === "runner" &&
       (overrides.workspaceAccess === "writable" ||
         (overrides.workspaceAccess === undefined &&
-          agent === "opencode-orchestrator-runner-writable")))
+          (agent === "opencode-orchestrator-runner-writable" ||
+            agent === "opencode-orchestrator-runner-writable-network"))))
 
   if (takesWriterLock) {
     acquireWriterLock(directory)
