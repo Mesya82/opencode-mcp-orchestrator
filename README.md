@@ -229,7 +229,7 @@ session or reset the operation deadline. A failure before the refresh timer, or
 after caller/operation cancellation, remains a real error and is not retried.
 
 Writable work is fail-closed per canonical worktree with states
-`active`, `cleaning`, and `quarantined`. A second worker or writable
+`active`, `cleaning`, `quarantined`, and `preserved`. A second worker or writable
 runner cannot start while any of those states is present. The state moves
 through `cleaning` on success, error, timeout, or cancellation, and is
 cleared only after `session.remove` is confirmed within the cleanup
@@ -240,6 +240,25 @@ session creation also quarantines until late-session reconciliation
 confirms removal, at which point it may clear. Quarantine is in-memory
 and clears on process restart; there is no force-clear API in this batch.
 Scout and read-only runner paths never consult writer state.
+
+Diagnostic preservation is a strict opt-in: only
+`OPENCODE_MCP_ORCHESTRATOR_PRESERVE_SESSIONS=1` enables it. When enabled,
+every delegated session (Scout, Worker, and Runner in either access mode)
+is retained instead of removed, and a `session_preserved` event records the
+session ID and outcome. Successful sessions are retained without
+interruption; unsuccessful sessions are interrupted best-effort before
+retention. Only Worker and writable Runner transition the worktree to the
+`preserved` state: the directory stays blocked for subsequent writable
+delegation. Retained Scout and read-only Runner sessions never touch
+writer state, so they neither block nor poison later writable work.
+A writable timeout before
+`session.create()` resolves still blocks the directory; once creation
+resolves late, reconciliation attaches the session ID, interrupts exactly
+once, never removes the session, and emits `session_preserved` with
+`succeeded:false`. Recovery is to verify the preserved session is no
+longer executing, inspect the workspace and inspect/export the preserved
+session, then restart the bridge; preserved sessions are retained as
+diagnostic evidence.
 
 When Codex integration is selected, installation writes the profile's parent
 deadline to `mcp_servers.opencode-agents.tool_timeout_sec` in Codex

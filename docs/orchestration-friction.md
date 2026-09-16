@@ -73,6 +73,7 @@ Worker and writable Runner calls now share a per-canonical-worktree lifecycle:
 free -> active -> cleaning -> free
                   |
                   +-> quarantined
+                  +-> preserved
 ```
 
 The worktree becomes free only when `session.remove` resolves successfully
@@ -83,6 +84,26 @@ before session creation finishes, the original error retains its timeout or
 cancellation detail and also reports quarantine; late creation remains
 quarantined until the background reconciliation confirms removal. Scout and
 read-only Runner calls do not consult writer state.
+
+Diagnostic preservation is a strict opt-in: only
+`OPENCODE_MCP_ORCHESTRATOR_PRESERVE_SESSIONS=1` enables it. When enabled,
+every delegated session (Scout, Worker, and Runner in either access mode)
+is retained instead of removed: a `session_preserved` event records the
+session ID and outcome. Successful sessions are retained without
+interruption; the session is interrupted best-effort only after
+unsuccessful work, never removed. Only Worker and writable Runner
+transition the worktree to the terminal `preserved` state above, which
+stays blocked for later writable delegation. Retained Scout and
+read-only Runner sessions never consult or update writer state, so they
+neither block nor poison subsequent writable delegation. A writable timeout
+before `session.create()` resolves still blocks the directory; once creation
+resolves late, reconciliation attaches the session ID, interrupts exactly
+once, never
+removes the session, and emits `session_preserved` with
+`succeeded:false`. Recovery is to verify the preserved session is no
+longer executing, inspect the workspace and inspect/export the preserved
+session, then restart the bridge; preserved sessions are retained as
+diagnostic evidence.
 
 Quarantine is deliberately in-memory and has no force-clear API. Before
 restarting the bridge to clear it, inspect Git status and the focused diff and
