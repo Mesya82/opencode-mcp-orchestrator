@@ -3,7 +3,7 @@ name: orchestrate
 description: Cost-aware orchestration for substantial software-development work. Keep GPT-5.6 Sol as the persistent reasoning and integration layer and delegate bounded repository reconnaissance or implementation to delegated OpenCode agents through the opencode-agents MCP tools.
 ---
 
-# Cost-aware software orchestration v4
+# Cost-aware software orchestration v5
 
 GPT-5.6 Sol is the persistent brain.
 
@@ -64,6 +64,27 @@ Use Sol directly when:
 - the work is primarily architectural or integrative
 - delegation would cost more context than doing the work directly
 
+Direct production edits are intentionally stricter than the general routing rule above.
+
+Sol may directly perform a tiny integration correction only when all of these are true:
+- the exact edit location is already known
+- the correction is confined to one existing file
+- no new helper, function, or control-flow block is required
+- no new file is required
+- no non-trivial diagnostic, test, or probe script is required
+- no investigation is required to determine the implementation
+- one focused verification should be enough to settle the correction
+
+Delegate the implementation to Worker as soon as any of these applies:
+- a new file is required
+- a new helper, function, or control-flow block is required
+- a diagnostic, test, or probe script is more than a trivial command
+- the same direct correction fails verification once
+- investigation plus implementation is required
+- multiple related production edits are needed
+
+Do not let a direct integration correction grow into an edit-diagnose-edit loop. Once it crosses this boundary, Worker owns the implementation.
+
 ### Scout
 
 Use `opencode-agents.scout` for repository factual discovery.
@@ -97,6 +118,23 @@ Ask for:
 - concise evidence
 
 For parsing, deserialization, loading, invocation, assignment, queueing, or state changes, require the literal operation and its containing function.
+
+Scout may also perform a bounded read-only acceptance audit after a substantial Worker change.
+
+For an acceptance audit, give Scout:
+- the acceptance criteria
+- the relevant changed area or focused diff context
+- the specific risks or invariants that need evidence
+
+Ask Scout to return:
+- evidence for each acceptance criterion
+- concrete mismatches or missing coverage
+- uncertainty that requires root judgment
+- exact paths and symbols for any high-risk finding
+
+Scout gathers evidence. Sol keeps architecture, integration, and final acceptance.
+
+If Sol would otherwise reread multiple unrelated areas after Worker completes, prefer one bounded Scout acceptance audit instead. Sol should spot-check only a small number of genuinely high-risk locations.
 
 The scout discovers what the repository currently does.
 
@@ -215,6 +253,36 @@ If a worker makes a change whose broad verification would produce substantial ou
 
 Do not repeat a successful runner command merely for reassurance.
 
+## Root-owned long-running commands
+
+Prefer delegated Runner execution for noisy or long-running commands whenever Runner can own the command.
+
+When Sol must supervise a long-running command directly:
+- prefer a blocking call through expected completion whenever the tool supports it
+- if the command becomes asynchronous, use the longest practical blocking or yield interval rather than short status polls
+- for long builds and tests, normally wait roughly 60-120 seconds between observations when supported
+- treat about 30 seconds as a practical floor for a healthy long-running build or test unless there is a concrete reason to observe sooner
+- never poll a healthy process at 1-5 second intervals
+- never create a root-model turn merely to learn that a healthy process is still running
+
+`Still running` alone is not useful new information worth another expensive root-model turn.
+
+Do not shorten waits merely because the parent can poll cheaply at the tool layer. Every root turn can reprocess a large accumulated context.
+
+## Progressive verification
+
+After a broad verification command fails:
+
+1. diagnose the concrete failure
+2. run the narrowest target that proves the repair
+3. iterate only on that focused target until it passes
+4. rerun the broad suite once focused verification passes
+5. if the broad suite reveals a different failure, return to a narrow target for that new failure before another broad run
+
+Do not repeatedly rerun full build, test, lint, or typecheck suites after every small repair.
+
+When the repair loop becomes implementation rather than integration, route it to Worker under the direct-edit boundary above.
+
 ## Root repository browsing budget
 
 Scout delegation exists to absorb broad repository exploration.
@@ -254,11 +322,15 @@ If another repository-wide fact is needed, prefer one focused scout call.
 After a worker succeeds:
 
 1. inspect only the resulting state or focused diff needed for integration
-2. verify the remaining integration risk
-3. check acceptance criteria
-4. integrate without optional polishing
+2. for a substantial change, prefer a bounded Scout acceptance audit instead of broad root rereading
+3. spot-check only a small number of genuinely high-risk locations when needed
+4. verify the remaining integration risk
+5. check acceptance criteria and make the final acceptance decision
+6. integrate without optional polishing
 
 Do not automatically rerun the worker's complete verification suite.
+
+Do not broadly reread multiple unrelated source areas for reassurance after Worker completes. Delegate that evidence gathering to Scout.
 
 Do not redo the implementation merely because delegation was used.
 
@@ -266,9 +338,23 @@ If the worker repaired content back to HEAD, an empty diff can be correct.
 
 Check the requested resulting state rather than assuming an empty diff means failure.
 
-A tiny integration correction may be performed directly by Sol.
+A tiny integration correction may be performed directly by Sol only when it satisfies every condition in the mechanical direct-edit boundary above. If that correction fails focused verification once, stop direct repair and delegate it to Worker.
 
 A materially incorrect implementation should be treated as worker failure, not silently redone.
+
+## Delegation task construction
+
+Treat arbitrary Scout, Worker, and Runner task text as data, never as trusted JavaScript or template-literal source.
+
+Prefer native structured MCP/tool arguments whenever they are available.
+
+If a Codex JavaScript wrapper must be constructed:
+- use one JSON-safe construction pattern for arbitrary task text
+- serialize task text as data rather than interpolating it directly into quoted or template-literal source
+- preserve backticks, `${...}`, quotes, backslashes, and arbitrary multiline text unchanged
+- never paste a long arbitrary task payload directly inside a JavaScript template literal
+
+Do not hand-build escaping rules ad hoc for each delegation call. The payload should survive arbitrary ordinary task text without changing wrapper syntax.
 
 ## Failure semantics
 
@@ -300,6 +386,30 @@ Action:
 Retry once only when:
 - the cause is obvious and has been corrected, or
 - the failure is clearly transient
+
+### Deterministic execution-path failure memory
+
+Within the current root turn/session, remember deterministic execution failures by the effective combination of:
+
+    execution route + canonical workspace + relevant capability/environment failure
+
+Do not retry the same effective path unchanged after a deterministic infrastructure or capability failure.
+
+Examples include:
+- a mandatory Git precheck rejecting an unusable or non-Git workspace before the requested command runs
+- a missing execution capability
+- a missing required toolchain or environment
+- an execution-domain mismatch that fails before the requested command can meaningfully run
+
+Changing only the requested command does not justify a retry when the known failure happens before command execution.
+
+Retry only when something relevant changed, for example:
+- the workspace changed
+- the execution route or domain changed
+- the required capability or access mode changed
+- the missing environment or toolchain was supplied
+- the identified failure was actually repaired
+- the failure is clearly transient under the retry rule above
 
 ### Semantic scout failure
 
