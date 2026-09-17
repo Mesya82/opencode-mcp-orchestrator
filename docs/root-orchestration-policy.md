@@ -27,7 +27,7 @@ After a broad verification command fails:
 2. run the narrowest target that proves the repair;
 3. iterate only on that focused target until it passes;
 4. rerun the broad suite once focused verification passes;
-5. if the broad suite reveals a different failure, return to a narrow target for that failure before another broad run.
+5. if the broad suite reveals a different failure, return to a narrow target for that new failure before another broad run.
 
 Do not repeatedly rerun full build/test/lint/typecheck suites after every small repair.
 
