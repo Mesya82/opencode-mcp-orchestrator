@@ -473,7 +473,9 @@ test("four execution tools exist with identical model-visible schema", () => {
     "timeout_seconds",
   ])
   assert.equal(schema.additionalProperties, false)
-  assert.ok(!source.includes("network_access"))
+  // Runner execution inputs still expose no network selector. The plugin may
+  // now mention network_access for the separately permission-scoped
+  // existing-container Worker capability.
   assert.ok(!JSON.stringify(schema).includes("network"))
 })
 
