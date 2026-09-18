@@ -338,7 +338,7 @@ If the worker repaired content back to HEAD, an empty diff can be correct.
 
 Check the requested resulting state rather than assuming an empty diff means failure.
 
-A tiny integration correction may be performed directly by Sol only when it satisfies every condition in the mechanical direct-edit boundary above. If that correction fails focused verification once, stop direct repair and delegate it to Worker.
+A tiny integration correction may be performed directly by Sol only when it satisfies every condition in the mechanical direct-edit boundary above. If that correction fails verification once, stop direct repair and delegate it to Worker.
 
 A materially incorrect implementation should be treated as worker failure, not silently redone.
 
