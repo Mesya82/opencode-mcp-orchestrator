@@ -446,6 +446,31 @@ test("existing-container admission rejects ancestor runtime-socket mounts even r
   }
 })
 
+test("existing-container admission rejects remapped rootless Docker and containerd sockets", () => {
+  for (const source of [
+    "/run/user/1000/docker.sock",
+    "/run/user/1000/docker/docker.sock",
+    "/run/user/1000/containerd/containerd.sock",
+    "/run/user/1000/containerd-rootless/api.sock",
+  ]) {
+    for (const writable of [false, true]) {
+      assert.throws(
+        () => validateExistingContainerInspect({
+          State: { Running: true },
+          HostConfig: { Privileged: false, PidMode: "" },
+          Mounts: [{
+            Type: "bind",
+            Source: source,
+            Destination: "/tmp/runtime-api",
+            RW: writable,
+          }],
+        }),
+        /runtime socket/,
+      )
+    }
+  }
+})
+
 test("existing-container admission rejects writable mounts overlapping capability storage", () => {
   assert.throws(
     () => validateExistingContainerInspect({
@@ -605,7 +630,7 @@ test("writable auto mapping rejects a read-only workspace mount", () => {
   )
 })
 
-test("existing-container runtime preserves only validated rootless path environment", () => {
+test("existing-container runtime preserves validated local Unix endpoint and required rootless paths only", () => {
   assert.deepEqual(
     containerRuntimeEnv({
       HOME: "/home/tester",
@@ -615,7 +640,7 @@ test("existing-container runtime preserves only validated rootless path environm
       XDG_CACHE_HOME: "/home/tester/.cache",
       CONTAINERS_STORAGE_CONF: "/home/tester/.config/containers/storage.conf",
       DOCKER_HOST: "unix:///tmp/attacker.sock",
-      CONTAINER_HOST: "unix:///tmp/attacker.sock",
+      CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
       AWS_SECRET_ACCESS_KEY: "secret",
     }),
     {
@@ -626,6 +651,7 @@ test("existing-container runtime preserves only validated rootless path environm
       XDG_DATA_HOME: "/home/tester/.local/share",
       XDG_CACHE_HOME: "/home/tester/.cache",
       CONTAINERS_STORAGE_CONF: "/home/tester/.config/containers/storage.conf",
+      CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
     },
   )
 
@@ -635,6 +661,22 @@ test("existing-container runtime preserves only validated rootless path environm
     }),
     /invalid HOME/,
   )
+
+  for (const value of [
+    "ssh://host/run/podman.sock",
+    "tcp://127.0.0.1:8080",
+    "unix://relative.sock",
+    "unix:///tmp/../run/podman.sock",
+    "unix:///tmp/socket%2Esock",
+  ]) {
+    assert.throws(
+      () => containerRuntimeEnv({
+        CONTAINER_HOST: value,
+      }),
+      /CONTAINER_HOST/,
+      value,
+    )
+  }
 })
 
 test("runtime resolution is fixed by host admission rather than model input", () => {
@@ -645,6 +687,7 @@ test("runtime resolution is fixed by host admission rather than model input", ()
     env: {
       HOME: "/home/tester",
       XDG_RUNTIME_DIR: "/run/user/1000",
+      CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
     },
     spawnSync: (command, argv, options) => {
       calls.push([command, argv, options])
@@ -672,7 +715,12 @@ test("runtime resolution is fixed by host admission rather than model input", ()
       PATH: "/usr/bin:/bin",
       HOME: "/home/tester",
       XDG_RUNTIME_DIR: "/run/user/1000",
+      CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
     },
+  )
+  assert.deepEqual(
+    resolved.env,
+    calls[0][2].env,
   )
   assert.ok(EXISTING_CONTAINER_RUNTIME_PATHS.includes("/usr/bin/podman"))
 })
