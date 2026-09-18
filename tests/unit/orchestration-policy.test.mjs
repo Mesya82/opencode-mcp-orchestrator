@@ -32,6 +32,7 @@ test("root-owned long-command policy forbids high-frequency status churn", () =>
     "60-120 seconds",
     "30 seconds",
     "1-5 second intervals",
+    "never create a root-model turn merely to learn that a healthy process is still running",
     "`Still running` alone is not useful new information",
   ]
 
@@ -44,6 +45,7 @@ test("root-owned long-command policy forbids high-frequency status churn", () =>
       "60-120 seconds",
       "30 seconds",
       "1-5 second intervals",
+      "never create a root turn merely to learn that the process is still running",
       "`Still running` alone is not useful new information",
     ],
     "root orchestration policy doc",
@@ -132,7 +134,7 @@ test("direct root production edits have a mechanical tiny-fix boundary", () => {
     },
     {
       skill: "the same direct correction fails verification once",
-      policy: "the direct correction fails focused verification once",
+      policy: "the same direct correction fails verification once",
     },
     {
       skill: "investigation plus implementation is required",
@@ -194,6 +196,7 @@ test("delegation payloads are treated as data and constructed JSON-safely", () =
   const required = [
     "## Delegation task construction",
     "Treat arbitrary Scout, Worker, and Runner task text as data",
+    "Prefer native structured MCP/tool arguments whenever they are available",
     "use one JSON-safe construction pattern",
     "preserve backticks, `${...}`, quotes, backslashes, and arbitrary multiline text unchanged",
     "never paste a long arbitrary task payload directly inside a JavaScript template literal",
@@ -206,6 +209,7 @@ test("delegation payloads are treated as data and constructed JSON-safely", () =
     [
       "## Safe delegation payload construction",
       "Treat arbitrary Scout/Worker/Runner task text as data",
+      "Prefer native structured MCP/tool arguments",
       "use one JSON-safe serialization pattern",
       "backticks, `${...}`, quotes, backslashes, or arbitrary multiline content must survive unchanged",
     ],
