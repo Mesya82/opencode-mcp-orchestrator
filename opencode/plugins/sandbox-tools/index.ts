@@ -2649,7 +2649,7 @@ export default Plugin.define({
 
         description:
           "Run argv in the one existing container selected by the parent for this Worker session. " +
-          "The model cannot select a container or access generic Podman/Docker control. Full output is persisted for sandbox_log. " +
+          "The model cannot select a container or access generic Podman/Docker control. Output is persisted outside model context up to the configured runner safety cap for sandbox_log; excess output is drained and marked truncated. " +
           "The existing container retains its own mounts, devices, credentials, services, and network configuration.",
 
         input: containerRunInputSchema(),
