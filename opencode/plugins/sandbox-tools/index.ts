@@ -1728,12 +1728,27 @@ export function validateExistingContainerInspect(
     throw new Error("selected existing container is not running")
   }
 
-  const hostConfig =
-    isRecord(info.HostConfig)
-      ? info.HostConfig
-      : {}
+  if (!isRecord(info.HostConfig)) {
+    throw new Error(
+      "invalid existing container inspection HostConfig",
+    )
+  }
 
-  if (hostConfig.Privileged === true) {
+  const hostConfig = info.HostConfig
+
+  if (typeof hostConfig.Privileged !== "boolean") {
+    throw new Error(
+      "invalid existing container inspection HostConfig.Privileged",
+    )
+  }
+
+  if (typeof hostConfig.PidMode !== "string") {
+    throw new Error(
+      "invalid existing container inspection HostConfig.PidMode",
+    )
+  }
+
+  if (hostConfig.Privileged) {
     throw new Error(
       "refusing privileged existing container",
     )
@@ -1745,23 +1760,37 @@ export function validateExistingContainerInspect(
     )
   }
 
-  const mounts =
-    Array.isArray(info.Mounts)
-      ? info.Mounts
-      : []
+  if (!Array.isArray(info.Mounts)) {
+    throw new Error(
+      "invalid existing container inspection Mounts",
+    )
+  }
+
+  const mounts = info.Mounts
 
   for (const mount of mounts) {
-    if (!isRecord(mount)) continue
+    if (!isRecord(mount)) {
+      throw new Error(
+        "invalid existing container inspection mount",
+      )
+    }
 
-    const source =
-      typeof mount.Source === "string"
-        ? mount.Source
-        : ""
-    const destination =
-      typeof mount.Destination === "string"
-        ? mount.Destination
-        : ""
-    const writable = mount.RW !== false
+    if (
+      typeof mount.Type !== "string" ||
+      typeof mount.Source !== "string" ||
+      typeof mount.Destination !== "string" ||
+      typeof mount.RW !== "boolean" ||
+      mount.Destination === "" ||
+      !isAbsolute(mount.Destination)
+    ) {
+      throw new Error(
+        "invalid existing container inspection mount",
+      )
+    }
+
+    const source = mount.Source
+    const destination = mount.Destination
+    const writable = mount.RW
 
     if (source === "/" && writable) {
       throw new Error(
@@ -1885,11 +1914,30 @@ export function buildContainerExecArgs(
   ]
 }
 
-function resolveContainerRunWorkdir(
-  runtime: string,
+function pathIsWithin(
+  base: string,
+  candidate: string,
+): boolean {
+  const rel = relative(
+    resolve(base),
+    resolve(candidate),
+  )
+
+  return (
+    rel === "" ||
+    (
+      rel !== ".." &&
+      !rel.startsWith(".." + sep) &&
+      !isAbsolute(rel)
+    )
+  )
+}
+
+export function resolveContainerRunWorkdir(
   capability: WorkerContainerCapability,
   requested: string | undefined,
-): string | undefined {
+  inspect: Record<string, unknown>,
+): string {
   if (requested !== undefined) {
     if (
       requested.trim() === "" ||
@@ -1907,28 +1955,73 @@ function resolveContainerRunWorkdir(
     return capability.containerCwd
   }
 
-  const probe = spawnSync(
-    runtime,
-    [
-      "exec",
-      capability.container,
-      "test",
-      "-d",
-      capability.hostCwd,
-    ],
-    {
-      encoding: "utf8",
-      timeout: 10_000,
-      maxBuffer: 64 * 1024,
-      env: {
-        PATH: "/usr/bin:/bin",
-      },
-    },
+  if (!Array.isArray(inspect.Mounts)) {
+    throw new Error(
+      "cannot auto-map worker cwd: existing container inspection has no valid mount table",
+    )
+  }
+
+  const hostCwd = resolve(capability.hostCwd)
+  const candidates: Array<{
+    source: string
+    destination: string
+    writable: boolean
+  }> = []
+
+  for (const rawMount of inspect.Mounts) {
+    if (
+      !isRecord(rawMount) ||
+      typeof rawMount.Source !== "string" ||
+      typeof rawMount.Destination !== "string" ||
+      typeof rawMount.RW !== "boolean" ||
+      rawMount.Source === "" ||
+      !isAbsolute(rawMount.Source) ||
+      !isAbsolute(rawMount.Destination)
+    ) {
+      continue
+    }
+
+    const source = resolve(rawMount.Source)
+
+    if (!pathIsWithin(source, hostCwd)) {
+      continue
+    }
+
+    candidates.push({
+      source,
+      destination: rawMount.Destination,
+      writable: rawMount.RW,
+    })
+  }
+
+  candidates.sort(
+    (left, right) =>
+      right.source.length - left.source.length,
   )
 
-  return probe.status === 0
-    ? capability.hostCwd
-    : undefined
+  const selected = candidates[0]
+
+  if (!selected) {
+    throw new Error(
+      "cannot auto-map worker cwd into the selected existing container from its inspected mount table; set execution.container_cwd explicitly",
+    )
+  }
+
+  if (
+    capability.workspaceAccess === "writable" &&
+    !selected.writable
+  ) {
+    throw new Error(
+      "cannot auto-map writable worker cwd through a read-only container mount; select an appropriate container or set execution.container_cwd explicitly",
+    )
+  }
+
+  const suffix =
+    relative(selected.source, hostCwd)
+
+  return suffix === ""
+    ? selected.destination
+    : resolve(selected.destination, suffix)
 }
 
 async function executeContainerRun(
@@ -1937,7 +2030,7 @@ async function executeContainerRun(
 ): Promise<{ content: string }> {
   const capability =
     readWorkerContainerCapability(sessionID)
-  const { runtime } =
+  const { runtime, inspect } =
     resolveExistingContainerRuntime(
       capability.container,
     )
@@ -1959,9 +2052,9 @@ async function executeContainerRun(
 
   const workdir =
     resolveContainerRunWorkdir(
-      runtime,
       capability,
       input.workdir,
+      inspect,
     )
 
   ensureRunnerRoot()
