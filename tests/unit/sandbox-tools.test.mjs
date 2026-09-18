@@ -620,41 +620,59 @@ test("worker container capability is session-bound and validates stored state", 
   )
 })
 
-test("async logged process aborts promptly without blocking the event loop", async () => {
+test("async logged process aborts promptly without blocking concurrent execution", async () => {
   const dir = mkdtempSync(
     join(tmpdir(), "container-run-abort-"),
   )
 
   try {
     const controller = new AbortController()
-    const logPath = join(dir, "combined.log")
-    let eventLoopProgressed = false
-
-    const run = runCancellableLoggedProcess(
+    const longRun = runCancellableLoggedProcess(
       process.execPath,
       [
         "-e",
         "setInterval(() => {}, 1000)",
       ],
       {
-        logPath,
+        logPath: join(dir, "long.log"),
         logLimitBytes: 4096,
         timeoutMs: 5000,
         signal: controller.signal,
       },
     )
 
-    await new Promise((resolve) => {
-      setTimeout(() => {
-        eventLoopProgressed = true
-        resolve()
-      }, 25)
-    })
+    const quickRun = runCancellableLoggedProcess(
+      process.execPath,
+      [
+        "-e",
+        'process.stdout.write("quick")',
+      ],
+      {
+        logPath: join(dir, "quick.log"),
+        logLimitBytes: 4096,
+        timeoutMs: 1000,
+      },
+    )
+
+    const quickResult = await Promise.race([
+      quickRun,
+      new Promise((_, reject) => {
+        setTimeout(
+          () => reject(
+            new Error("concurrent execution was blocked"),
+          ),
+          1000,
+        )
+      }),
+    ])
+
+    assert.equal(quickResult.exitCode, 0)
+    assert.equal(quickResult.timedOut, false)
 
     controller.abort()
 
     const result = await Promise.race([
-      run,
+      longRun,
       new Promise((_, reject) => {
         setTimeout(
           () => reject(
@@ -665,7 +683,6 @@ test("async logged process aborts promptly without blocking the event loop", asy
       }),
     ])
 
-    assert.equal(eventLoopProgressed, true)
     assert.equal(result.aborted, true)
     assert.equal(result.timedOut, false)
     assert.ok(result.elapsedMs < 1000)
