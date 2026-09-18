@@ -2272,7 +2272,7 @@ const MANAGED_CONTAINER_WRAPPER = [
   '',
   'exec "$@"',
   '\' sh "$token" "$@"',
-].join("\\n")
+].join("\n")
 
 const MANAGED_CONTAINER_TERMINATE = [
   'pid="$1"',
@@ -2314,7 +2314,7 @@ const MANAGED_CONTAINER_TERMINATE = [
   'done',
   '',
   'exit 5',
-].join("\\n")
+].join("\n")
 
 async function terminateManagedContainerProcess(
   runtime: string,
