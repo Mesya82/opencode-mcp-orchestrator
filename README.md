@@ -331,6 +331,8 @@ The installer adds:
 
     ~/.config/opencode/agents/opencode-orchestrator-scout.md
     ~/.config/opencode/agents/opencode-orchestrator-worker.md
+    ~/.config/opencode/agents/opencode-orchestrator-worker-container.md
+    ~/.config/opencode/agents/opencode-orchestrator-worker-container-readonly.md
     ~/.config/opencode/agents/opencode-orchestrator-runner.md
     ~/.config/opencode/agents/opencode-orchestrator-runner-writable.md
     ~/.config/opencode/agents/opencode-orchestrator-runner-network.md
@@ -418,6 +420,39 @@ Its sandbox permits normal workspace edits but protects Git metadata and blocks
 access to files outside the allowed workspace.
 
 The worker must not perform Git-mutating operations.
+
+Worker also supports an optional parent-selected existing-container execution
+mode for projects whose build/test toolchain already lives in a running
+development container. No named profile is required:
+
+    worker({
+      cwd: "/home/me/project",
+      task: "Implement and verify ...",
+      execution: {
+        kind: "existing_container",
+        container: "dev-box"
+      }
+    })
+
+The default remains the existing isolated sandbox. For
+`kind: "existing_container"`, `workspace_access` defaults to `"writable"`,
+`container_cwd` defaults to `"auto"`, and `network_access` is accurately
+reported as `"inherit"`. The bridge binds the selected container to the
+OpenCode session before prompting the Worker. The model-visible
+`container_run` tool accepts only an argv array, optional absolute workdir, and
+timeout; it has no container/runtime/network selector and does not expose
+Podman/Docker binaries or sockets as general-purpose tools.
+
+Full command output is persisted in the same bounded run-log store used by
+Runner and can be inspected with `sandbox_log`. Existing containers are not
+sandboxes created by this project: they retain whatever mounts, devices,
+credentials, services, and network access they already have. Generic admission
+checks reject clearly unsafe cases such as privileged containers, host-PID
+containers, writable host-root mounts, and mounted container-runtime sockets.
+The parent remains responsible for selecting an appropriate existing
+development container. `workspace_access` describes intended project mutation
+semantics; it cannot remove unrelated capabilities from a pre-existing
+container.
 
 ### Runner
 
