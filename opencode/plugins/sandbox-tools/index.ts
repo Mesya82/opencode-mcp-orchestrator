@@ -2252,6 +2252,543 @@ export async function runCancellableLoggedProcess(
   }
 }
 
+const MANAGED_CONTAINER_WRAPPER = [
+  'token="$1"',
+  'shift',
+  '',
+  'if ! command -v setsid >/dev/null 2>&1; then',
+  '  printf "%s:error:setsid-unavailable\\n" "$token"',
+  '  exit 126',
+  'fi',
+  '',
+  'exec setsid /bin/sh -c \'',
+  'token="$1"',
+  'shift',
+  '',
+  'printf "%s:ready:%s\\n" "$token" "$$"',
+  '',
+  'IFS= read -r ack || exit 125',
+  '[ "$ack" = "$token:go" ] || exit 125',
+  '',
+  'exec "$@"',
+  '\' sh "$token" "$@"',
+].join("\\n")
+
+const MANAGED_CONTAINER_TERMINATE = [
+  'pid="$1"',
+  '',
+  'if [ ! -d "/proc/$pid" ]; then',
+  '  exit 0',
+  'fi',
+  '',
+  'stat="$(cat "/proc/$pid/stat" 2>/dev/null)" || exit 3',
+  'rest="${stat##*) }"',
+  'set -- $rest',
+  'pgid="$3"',
+  '',
+  '[ "$pgid" = "$pid" ] || exit 4',
+  '',
+  'kill_tree() {',
+  '  target="$1"',
+  '',
+  '  if [ -r "/proc/$target/task/$target/children" ]; then',
+  '    for child in $(cat "/proc/$target/task/$target/children" 2>/dev/null); do',
+  '      kill_tree "$child"',
+  '    done',
+  '  fi',
+  '',
+  '  kill -KILL "$target" 2>/dev/null || true',
+  '}',
+  '',
+  'kill_tree "$pid"',
+  'kill -KILL "-$pid" 2>/dev/null || true',
+  '',
+  'attempt=0',
+  'while [ "$attempt" -lt 50 ]; do',
+  '  if [ ! -d "/proc/$pid" ] && ! kill -0 "-$pid" 2>/dev/null; then',
+  '    exit 0',
+  '  fi',
+  '',
+  '  sleep 0.1',
+  '  attempt=$((attempt + 1))',
+  'done',
+  '',
+  'exit 5',
+].join("\\n")
+
+async function terminateManagedContainerProcess(
+  runtime: string,
+  container: string,
+  rootPid: number,
+): Promise<boolean> {
+  const child = spawn(
+    runtime,
+    buildContainerExecArgs(
+      container,
+      [
+        "/bin/sh",
+        "-c",
+        MANAGED_CONTAINER_TERMINATE,
+        "sh",
+        String(rootPid),
+      ],
+    ),
+    {
+      stdio: ["ignore", "ignore", "ignore"],
+      env: {
+        PATH: "/usr/bin:/bin",
+      },
+    },
+  )
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  try {
+    const completion =
+      await Promise.race([
+        new Promise<{
+          code: number | null
+          error?: Error
+        }>((resolveCompletion) => {
+          let settled = false
+
+          const finish = (
+            value: {
+              code: number | null
+              error?: Error
+            },
+          ) => {
+            if (settled) return
+            settled = true
+            resolveCompletion(value)
+          }
+
+          child.once(
+            "error",
+            (error) => finish({
+              code: null,
+              error,
+            }),
+          )
+
+          child.once(
+            "close",
+            (code) => finish({ code }),
+          )
+        }),
+
+        new Promise<{
+          code: null
+          error: Error
+        }>((resolveTimeout) => {
+          timer = setTimeout(() => {
+            try {
+              child.kill("SIGKILL")
+            } catch {
+              // Already exited.
+            }
+
+            resolveTimeout({
+              code: null,
+              error: new Error(
+                "container termination verification timed out",
+              ),
+            })
+          }, 7_000)
+        }),
+      ])
+
+    return (
+      completion.code === 0 &&
+      !completion.error
+    )
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+export async function runManagedContainerProcess(
+  runtime: string,
+  container: string,
+  argv: readonly string[],
+  workdir: string,
+  options: {
+    logPath: string
+    activityPath: string
+    logLimitBytes: number
+    timeoutMs: number
+    signal?: AbortSignal
+    writeFn?: typeof writeSync
+  },
+): Promise<{
+  exitCode: number
+  timedOut: boolean
+  aborted: boolean
+  elapsedMs: number
+  truncated: boolean
+  terminationConfirmed: boolean
+  spawnError?: Error
+  logError?: Error
+}> {
+  const started = Date.now()
+  const token =
+    "opencode-" +
+    randomUUID().replaceAll("-", "")
+  const logFd = openSync(
+    options.logPath,
+    "w",
+    0o600,
+  )
+
+  writeFileSync(
+    options.activityPath,
+    JSON.stringify({
+      version: 1,
+      container,
+      startedAt: new Date().toISOString(),
+    }) + "\\n",
+    {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    },
+  )
+
+  let child:
+    | ReturnType<typeof spawn>
+    | undefined
+  let controlBuffer = Buffer.alloc(0)
+  let rootPid: number | undefined
+  let commandStarted = false
+  let stderrStarted = false
+  let timedOut = false
+  let aborted = options.signal?.aborted === true
+  let protocolError: Error | undefined
+  let logError: Error | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let stopRequested = false
+  let written = 0
+  let truncated = false
+
+  const killClient = () => {
+    try {
+      child?.kill("SIGKILL")
+    } catch {
+      // Already exited.
+    }
+  }
+
+  const requestStop = () => {
+    if (stopRequested) return
+    stopRequested = true
+    killClient()
+  }
+
+  const writeLog = (chunk: unknown) => {
+    if (logError) return
+
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (written >= options.logLimitBytes) {
+      if (buffer.length > 0) truncated = true
+      return
+    }
+
+    const keep =
+      buffer.subarray(
+        0,
+        Math.max(
+          0,
+          options.logLimitBytes - written,
+        ),
+      )
+
+    try {
+      if (keep.length > 0) {
+        ;(options.writeFn ?? writeSync)(
+          logFd,
+          keep,
+        )
+        written += keep.length
+      }
+    } catch (error) {
+      logError =
+        error instanceof Error
+          ? error
+          : new Error(String(error))
+      requestStop()
+      return
+    }
+
+    if (keep.length !== buffer.length) {
+      truncated = true
+    }
+  }
+
+  const writeStderr = (chunk: unknown) => {
+    if (!stderrStarted) {
+      stderrStarted = true
+      writeLog(
+        Buffer.from("\\n[stderr]\\n"),
+      )
+    }
+
+    writeLog(chunk)
+  }
+
+  const processStdout = (chunk: unknown) => {
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (rootPid !== undefined) {
+      writeLog(buffer)
+      return
+    }
+
+    controlBuffer =
+      Buffer.concat([controlBuffer, buffer])
+
+    if (controlBuffer.length > 4096) {
+      protocolError =
+        new Error(
+          "container_run startup handshake exceeded its safety bound",
+        )
+      requestStop()
+      return
+    }
+
+    const newline =
+      controlBuffer.indexOf(0x0a)
+
+    if (newline < 0) return
+
+    const line =
+      controlBuffer
+        .subarray(0, newline)
+        .toString("utf8")
+        .trim()
+    const remainder =
+      controlBuffer.subarray(newline + 1)
+    controlBuffer = Buffer.alloc(0)
+
+    const match =
+      line.match(
+        new RegExp(
+          "^" +
+          token +
+          ":ready:([1-9][0-9]*)$",
+        ),
+      )
+
+    if (!match) {
+      protocolError =
+        new Error(
+          "container_run failed to establish a managed process group",
+        )
+      requestStop()
+      return
+    }
+
+    rootPid = Number(match[1])
+
+    try {
+      child?.stdin?.write(
+        token + ":go\\n",
+      )
+      commandStarted = true
+    } catch (error) {
+      protocolError =
+        error instanceof Error
+          ? error
+          : new Error(String(error))
+      requestStop()
+      return
+    }
+
+    if (remainder.length > 0) {
+      writeLog(remainder)
+    }
+  }
+
+  const onAbort = () => {
+    aborted = true
+    requestStop()
+  }
+
+  let completion:
+    | {
+        code: number | null
+        signal: NodeJS.Signals | null
+        error?: Error
+      }
+    | undefined
+
+  try {
+    child = spawn(
+      runtime,
+      buildContainerExecArgs(
+        container,
+        [
+          "/bin/sh",
+          "-c",
+          MANAGED_CONTAINER_WRAPPER,
+          "sh",
+          token,
+          ...argv,
+        ],
+        workdir,
+        true,
+      ),
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: {
+          PATH: "/usr/bin:/bin",
+        },
+      },
+    )
+
+    child.stdin?.on("error", () => {
+      // Cancellation can close stdin while the runtime client is exiting.
+    })
+    child.stdout?.on("data", processStdout)
+    child.stderr?.on("data", writeStderr)
+
+    if (options.signal) {
+      options.signal.addEventListener(
+        "abort",
+        onAbort,
+        { once: true },
+      )
+    }
+
+    if (aborted) {
+      requestStop()
+    }
+
+    timer = setTimeout(() => {
+      timedOut = true
+      requestStop()
+    }, options.timeoutMs)
+
+    completion =
+      await new Promise((resolveCompletion) => {
+        let settled = false
+
+        const finish = (
+          value: {
+            code: number | null
+            signal: NodeJS.Signals | null
+            error?: Error
+          },
+        ) => {
+          if (settled) return
+          settled = true
+          resolveCompletion(value)
+        }
+
+        child!.once(
+          "error",
+          (error) => finish({
+            code: null,
+            signal: null,
+            error,
+          }),
+        )
+
+        child!.once(
+          "close",
+          (code, signal) => finish({
+            code,
+            signal,
+          }),
+        )
+      })
+  } finally {
+    if (timer) clearTimeout(timer)
+
+    options.signal?.removeEventListener(
+      "abort",
+      onAbort,
+    )
+
+    closeSync(logFd)
+  }
+
+  const abnormalLauncherExit =
+    completion?.error !== undefined ||
+    completion?.signal !== null
+
+  const needsTermination =
+    commandStarted &&
+    (
+      aborted ||
+      timedOut ||
+      logError !== undefined ||
+      protocolError !== undefined ||
+      abnormalLauncherExit
+    )
+
+  let terminationConfirmed = true
+
+  if (
+    needsTermination &&
+    rootPid !== undefined
+  ) {
+    terminationConfirmed =
+      await terminateManagedContainerProcess(
+        runtime,
+        container,
+        rootPid,
+      )
+  }
+
+  if (
+    !commandStarted ||
+    (
+      !needsTermination ||
+      terminationConfirmed
+    )
+  ) {
+    rmSync(
+      options.activityPath,
+      { force: true },
+    )
+  }
+
+  const exitCode =
+    Number.isInteger(completion?.code)
+      ? completion!.code!
+      : timedOut
+        ? 124
+        : aborted
+          ? 130
+          : 1
+
+  return {
+    exitCode,
+    timedOut,
+    aborted,
+    elapsedMs: Date.now() - started,
+    truncated,
+    terminationConfirmed,
+    ...(completion?.error
+      ? { spawnError: completion.error }
+      : {}),
+    ...(logError
+      ? { logError }
+      : {}),
+    ...(protocolError && !completion?.error
+      ? { spawnError: protocolError }
+      : {}),
+  }
+}
+
+
 async function executeContainerRun(
   sessionID: string,
   input: ContainerRunInput,
