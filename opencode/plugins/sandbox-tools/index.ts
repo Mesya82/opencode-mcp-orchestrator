@@ -2008,6 +2008,7 @@ export function resolveExistingContainerRuntime(
 ): {
   runtime: string
   inspect: Record<string, unknown>
+  env: Record<string, string>
 } {
   const exists =
     options?.existsSync ?? existsSync
@@ -2017,9 +2018,14 @@ export function resolveExistingContainerRuntime(
     options?.runtimePaths ??
     EXISTING_CONTAINER_RUNTIME_PATHS
 
+  const runtimeEnv =
+    containerRuntimeEnv(
+      options?.env ?? process.env,
+    )
   const matches: Array<{
     runtime: string
     inspect: Record<string, unknown>
+    env: Record<string, string>
   }> = []
 
   for (const runtime of runtimePaths) {
@@ -2032,9 +2038,7 @@ export function resolveExistingContainerRuntime(
         encoding: "utf8",
         timeout: 15_000,
         maxBuffer: 2 * 1024 * 1024,
-        env: containerRuntimeEnv(
-          options?.env ?? process.env,
-        ),
+        env: runtimeEnv,
       },
     )
 
@@ -2062,6 +2066,7 @@ export function resolveExistingContainerRuntime(
     matches.push({
       runtime,
       inspect: info as Record<string, unknown>,
+      env: runtimeEnv,
     })
   }
 
@@ -3295,7 +3300,11 @@ async function executeContainerRun(
 
   const capability =
     readWorkerContainerCapability(sessionID)
-  const { runtime, inspect } =
+  const {
+    runtime,
+    inspect,
+    env: runtimeEnv,
+  } =
     resolveExistingContainerRuntime(
       capability.container,
     )
@@ -3350,6 +3359,7 @@ async function executeContainerRun(
         timeoutMs:
           timeoutSeconds * 1000,
         signal: abortSignal,
+        runtimeEnv,
       },
     )
 
