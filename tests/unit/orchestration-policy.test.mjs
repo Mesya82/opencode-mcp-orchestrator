@@ -27,26 +27,59 @@ function assertContainsAll(text, fragments, label) {
 }
 
 test("root-owned long-command policy forbids high-frequency status churn", () => {
-  const required = [
-    "## Root-owned long-running commands",
-    "60-120 seconds",
-    "30 seconds",
-    "1-5 second intervals",
-    "never create a root-model turn merely to learn that a healthy process is still running",
-    "`Still running` alone is not useful new information",
+  const contract = [
+    {
+      skill: "Prefer delegated Runner execution for noisy or long-running commands whenever Runner can own the command.",
+      policy: "Prefer Runner whenever a delegated role can own a noisy or long-running command.",
+    },
+    {
+      skill: "prefer a blocking call through expected completion whenever the tool supports it",
+      policy: "prefer one blocking call through expected completion when supported",
+    },
+    {
+      skill: "if the command becomes asynchronous, use the longest practical blocking or yield interval rather than short status polls",
+      policy: "if the process becomes asynchronous, use the longest practical blocking/yield interval",
+    },
+    {
+      skill: "for long builds and tests, normally wait roughly 60-120 seconds between observations when supported",
+      policy: "for long builds/tests, normally wait roughly 60-120 seconds between observations",
+    },
+    {
+      skill: "treat about 30 seconds as a practical floor for a healthy long-running build or test unless there is a concrete reason to observe sooner",
+      policy: "treat about 30 seconds as a practical floor for a healthy long-running build/test unless there is a concrete reason to observe sooner",
+    },
+    {
+      skill: "never poll a healthy process at 1-5 second intervals",
+      policy: "never poll a healthy process at 1-5 second intervals",
+    },
+    {
+      skill: "never create a root-model turn merely to learn that a healthy process is still running",
+      policy: "never create a root turn merely to learn that the process is still running",
+    },
+    {
+      skill: "`Still running` alone is not useful new information worth another expensive root-model turn.",
+      policy: "`Still running` alone is not useful new information worth another root-model turn.",
+    },
+    {
+      skill: "Do not shorten waits merely because the parent can poll cheaply at the tool layer.",
+      policy: "A tool-layer poll may look cheap while still causing the parent model to reprocess a large accumulated context.",
+    },
   ]
 
-  assertContainsAll(skill, required, "orchestration skill")
+  assertContainsAll(
+    skill,
+    [
+      "## Root-owned long-running commands",
+      ...contract.map(({ skill }) => skill),
+    ],
+    "orchestration skill",
+  )
 
   assertContainsAll(
     policyDoc,
     [
       "## Long-running root-owned commands",
-      "60-120 seconds",
-      "30 seconds",
-      "1-5 second intervals",
-      "never create a root turn merely to learn that the process is still running",
-      "`Still running` alone is not useful new information",
+      ...contract.map(({ policy }) => policy),
     ],
     "root orchestration policy doc",
   )
@@ -55,14 +88,31 @@ test("root-owned long-command policy forbids high-frequency status churn", () =>
 test("progressive verification requires a focused repair target before another broad run", () => {
   const required = [
     "## Progressive verification",
+    "diagnose the concrete failure",
     "run the narrowest target that proves the repair",
     "iterate only on that focused target until it passes",
     "rerun the broad suite once focused verification passes",
-    "return to a narrow target for that new failure before another broad run",
+    "if the broad suite reveals a different failure, return to a narrow target for that new failure before another broad run",
   ]
 
-  assertContainsAll(skill, required, "orchestration skill")
-  assertContainsAll(policyDoc, required, "root orchestration policy doc")
+  assertContainsAll(
+    skill,
+    [
+      ...required,
+      "Do not repeatedly rerun full build, test, lint, or typecheck suites after every small repair.",
+      "When the repair loop becomes implementation rather than integration, route it to Worker under the direct-edit boundary above.",
+    ],
+    "orchestration skill",
+  )
+
+  assertContainsAll(
+    policyDoc,
+    [
+      ...required,
+      "Do not repeatedly rerun full build/test/lint/typecheck suites after every small repair.",
+    ],
+    "root orchestration policy doc",
+  )
 })
 
 test("deterministic infrastructure failures are remembered by effective execution path", () => {
@@ -193,25 +243,52 @@ test("substantial Worker changes prefer a bounded Scout acceptance audit", () =>
 })
 
 test("delegation payloads are treated as data and constructed JSON-safely", () => {
-  const required = [
-    "## Delegation task construction",
-    "Treat arbitrary Scout, Worker, and Runner task text as data",
-    "Prefer native structured MCP/tool arguments whenever they are available",
-    "use one JSON-safe construction pattern",
-    "preserve backticks, `${...}`, quotes, backslashes, and arbitrary multiline text unchanged",
-    "never paste a long arbitrary task payload directly inside a JavaScript template literal",
+  const contract = [
+    {
+      skill: "Treat arbitrary Scout, Worker, and Runner task text as data, never as trusted JavaScript or template-literal source.",
+      policy: "Treat arbitrary Scout/Worker/Runner task text as data, not JavaScript/template-literal source.",
+    },
+    {
+      skill: "Prefer native structured MCP/tool arguments whenever they are available.",
+      policy: "Prefer native structured MCP/tool arguments.",
+    },
+    {
+      skill: "use one JSON-safe construction pattern for arbitrary task text",
+      policy: "use one JSON-safe serialization pattern",
+    },
+    {
+      skill: "serialize task text as data rather than interpolating it directly into quoted or template-literal source",
+      policy: "keep arbitrary task text out of direct quoted/template interpolation",
+    },
+    {
+      skill: "preserve backticks, `${...}`, quotes, backslashes, and arbitrary multiline text unchanged",
+      policy: "Task text containing backticks, `${...}`, quotes, backslashes, or arbitrary multiline content must survive unchanged.",
+    },
+    {
+      skill: "never paste a long arbitrary task payload directly inside a JavaScript template literal",
+      policy: "Do not invent ad hoc escaping rules for each delegation call.",
+    },
+    {
+      skill: "Do not hand-build escaping rules ad hoc for each delegation call.",
+      policy: "The immediate requirement is to make unsafe construction explicitly forbidden by the orchestration policy.",
+    },
   ]
 
-  assertContainsAll(skill, required, "orchestration skill")
+  assertContainsAll(
+    skill,
+    [
+      "## Delegation task construction",
+      ...contract.map(({ skill }) => skill),
+    ],
+    "orchestration skill",
+  )
 
   assertContainsAll(
     policyDoc,
     [
       "## Safe delegation payload construction",
-      "Treat arbitrary Scout/Worker/Runner task text as data",
-      "Prefer native structured MCP/tool arguments",
-      "use one JSON-safe serialization pattern",
-      "backticks, `${...}`, quotes, backslashes, or arbitrary multiline content must survive unchanged",
+      ...contract.map(({ policy }) => policy),
+      "This issue does not require a new runtime helper unless a reusable repository-owned wrapper seam is identified.",
     ],
     "root orchestration policy doc",
   )
