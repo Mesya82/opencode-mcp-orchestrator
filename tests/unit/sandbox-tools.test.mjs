@@ -34,6 +34,13 @@ import sandboxPlugin, {
   SANDBOX_RUNTIME_CONFIG_ENV,
   SANDBOX_TOOLCHAIN_DIRS_ENV,
   SANDBOX_RUN_INPUT_PROPERTY_NAMES,
+  CONTAINER_RUN_INPUT_PROPERTY_NAMES,
+  EXISTING_CONTAINER_RUNTIME_PATHS,
+  buildContainerExecArgs,
+  containerRunInputSchema,
+  readWorkerContainerCapability,
+  resolveExistingContainerRuntime,
+  validateExistingContainerInspect,
   omitUnsupportedMuseFinalToolChoice,
   stripUnreplayableMuseReasoning,
   addAbsoluteWorktreeBind,
@@ -306,6 +313,144 @@ function fakeStat(overrides = {}) {
     ...overrides,
   }
 }
+
+test("container_run schema cannot select or broaden the parent-selected container", () => {
+  const schema = containerRunInputSchema()
+  assert.deepEqual(
+    Object.keys(schema.properties).sort(),
+    ["argv", "timeout_seconds", "workdir"],
+  )
+  assert.deepEqual(
+    [...CONTAINER_RUN_INPUT_PROPERTY_NAMES].sort(),
+    ["argv", "timeout_seconds", "workdir"],
+  )
+  assert.equal(schema.additionalProperties, false)
+  const serialized = JSON.stringify(schema)
+  assert.ok(!serialized.includes('"container"'))
+  assert.ok(!serialized.includes('"runtime"'))
+  assert.ok(!serialized.includes('"network_access"'))
+})
+
+test("container exec argv keeps runtime options before the fixed container and command argv after it", () => {
+  assert.deepEqual(
+    buildContainerExecArgs(
+      "dev-box",
+      ["printf", "%s", "--privileged", "a b"],
+      "/workspace",
+    ),
+    [
+      "exec",
+      "--workdir",
+      "/workspace",
+      "dev-box",
+      "printf",
+      "%s",
+      "--privileged",
+      "a b",
+    ],
+  )
+})
+
+test("existing-container admission rejects dangerous host capabilities", () => {
+  assert.doesNotThrow(() =>
+    validateExistingContainerInspect({
+      State: { Running: true },
+      HostConfig: { Privileged: false, PidMode: "" },
+      Mounts: [
+        {
+          Source: "/home/me/project",
+          Destination: "/workspace",
+          RW: true,
+        },
+      ],
+    }),
+  )
+
+  assert.throws(
+    () => validateExistingContainerInspect({
+      State: { Running: true },
+      HostConfig: { Privileged: true },
+      Mounts: [],
+    }),
+    /privileged/,
+  )
+
+  assert.throws(
+    () => validateExistingContainerInspect({
+      State: { Running: true },
+      HostConfig: { Privileged: false },
+      Mounts: [{ Source: "/", Destination: "/host", RW: true }],
+    }),
+    /host root/,
+  )
+
+  assert.throws(
+    () => validateExistingContainerInspect({
+      State: { Running: true },
+      HostConfig: { Privileged: false },
+      Mounts: [{
+        Source: "/run/podman/podman.sock",
+        Destination: "/run/podman/podman.sock",
+        RW: true,
+      }],
+    }),
+    /runtime socket/,
+  )
+})
+
+test("runtime resolution is fixed by host admission rather than model input", () => {
+  const calls = []
+  const resolved = resolveExistingContainerRuntime("dev-box", {
+    runtimePaths: ["/usr/bin/podman", "/usr/bin/docker"],
+    existsSync: (path) => path === "/usr/bin/podman",
+    spawnSync: (command, argv) => {
+      calls.push([command, argv])
+      return {
+        status: 0,
+        stdout: JSON.stringify([{
+          State: { Running: true },
+          HostConfig: { Privileged: false, PidMode: "" },
+          Mounts: [],
+        }]),
+        stderr: "",
+      }
+    },
+  })
+
+  assert.equal(resolved.runtime, "/usr/bin/podman")
+  assert.deepEqual(calls, [
+    ["/usr/bin/podman", ["inspect", "dev-box"]],
+  ])
+  assert.ok(EXISTING_CONTAINER_RUNTIME_PATHS.includes("/usr/bin/podman"))
+})
+
+test("worker container capability is session-bound and validates stored state", () => {
+  const cap = readWorkerContainerCapability("ses_test", {
+    root: "/tmp/test-cap-root",
+    readFileSync: (path, encoding) => {
+      assert.equal(path, "/tmp/test-cap-root/ses_test.json")
+      assert.equal(encoding, "utf8")
+      return JSON.stringify({
+        version: 1,
+        container: "dev-box",
+        workspaceAccess: "writable",
+        containerCwd: "auto",
+        networkAccess: "inherit",
+        hostCwd: "/home/me/project",
+      })
+    },
+  })
+
+  assert.equal(cap.container, "dev-box")
+  assert.equal(cap.networkAccess, "inherit")
+  assert.throws(
+    () => readWorkerContainerCapability("bad/session", {
+      root: "/tmp/test-cap-root",
+      readFileSync: () => "{}",
+    }),
+    /session id/,
+  )
+})
 
 test("synchronous spawn options carry finite timeouts", () => {
   for (const options of [
