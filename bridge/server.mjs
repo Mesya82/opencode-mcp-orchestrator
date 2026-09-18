@@ -1416,6 +1416,20 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     }
   }
 
+  const waitForWorkerContainerInactive = async () => {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (!await workerContainerExecutionActive()) {
+        return true
+      }
+
+      await new Promise((resolveWait) => {
+        setTimeout(resolveWait, 100)
+      })
+    }
+
+    return false
+  }
+
   /*
    * Exactly-once session cleanup/preservation. The outer finally runs it
    * promptly when timeout or cancellation wins the race; the background hook
@@ -1479,7 +1493,10 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       return
     }
 
-    if (await workerContainerExecutionActive()) {
+    if (
+      await workerContainerExecutionActive() &&
+      !await waitForWorkerContainerInactive()
+    ) {
       quarantineWriter(directory, sessionID)
       return
     }
