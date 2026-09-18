@@ -2951,8 +2951,11 @@ export async function runManagedContainerProcess(
   if (
     !commandStarted ||
     (
-      !needsTermination ||
-      terminationConfirmed
+      !detachedDescendantsDetected &&
+      (
+        !needsTermination ||
+        terminationConfirmed
+      )
     )
   ) {
     rmSync(
