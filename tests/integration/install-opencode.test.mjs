@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -44,6 +45,28 @@ function runInstaller(testRoot, configPath) {
         ...process.env,
         HOME: testRoot,
         XDG_CONFIG_HOME: resolve(testRoot, "config"),
+      },
+    },
+  )
+}
+
+function runDoctor(testRoot, configPath) {
+  return spawnSync(
+    process.execPath,
+    [
+      resolve(root, "installer/doctor.mjs"),
+      "--config",
+      configPath,
+      "--no-sandbox-probes",
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        HOME: testRoot,
+        XDG_CONFIG_HOME: resolve(testRoot, "config"),
+        XDG_DATA_HOME: resolve(testRoot, "data"),
+        OPENCODE_BIN: process.execPath,
       },
     },
   )
@@ -132,6 +155,21 @@ test("installer renders default and custom step-limit profiles", () => {
     assert.match(
       installedPlugin(testRoot),
       /opencode_orchestrator_muse_final_tool_choice_omitted/,
+    )
+    assert.match(standard.stdout, /OPENCODE_RESTART_REQUIRED/)
+    assert.equal(
+      existsSync(resolve(
+        testRoot,
+        "config/opencode-mcp-orchestrator/opencode-service-restart-required",
+      )),
+      true,
+    )
+
+    const doctor = runDoctor(testRoot, configPath)
+    assert.notEqual(doctor.status, 0)
+    assert.match(
+      doctor.stdout,
+      /plugin generation is not activated; rerun full orchestrator setup/,
     )
 
     writeConfig(

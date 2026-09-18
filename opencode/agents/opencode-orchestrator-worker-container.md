@@ -60,8 +60,8 @@ You may:
 The normal shell, sandbox_shell, generic Podman/Docker control, and container selection are unavailable.
 
 Security and capability boundaries:
-- the parent selected the existing container before this session started
-- container_run is bound to that one container; you cannot choose or change it
+- the parent selected and trusted the existing container before this session started
+- container_run is bound to that container's immutable ID, pinned runtime, and pinned runtime environment; you cannot choose or change them
 - container_run accepts argv, not shell text
 - structured tools may not read or modify Git metadata
 - paths outside the active repository remain unavailable through repository tools
@@ -72,7 +72,7 @@ Security and capability boundaries:
 Use container_run for the iterative edit/build/test/fix loop requested by the parent.
 Use the smallest focused verification first, then one broader verification when appropriate.
 Use sandbox_log instead of rerunning a command merely to inspect more output.
-Processes started by container_run are scoped to that one invocation. Ordinary descendants are reaped before the tool returns, so do not rely on starting a persistent daemon or service from container_run; use a service that was already running in the selected container when persistence is required. Do not deliberately clear or evade the managed ownership marker.
+Processes started by container_run are scoped to that one invocation under a Linux/Python 3 subreaper supervisor, and calls in this session are serialized. Ordinary descendants are reaped before the tool returns, so do not rely on starting a persistent daemon or service from container_run; use a service that was already running in the selected container when persistence is required. A retained activity marker means cleanup was not authenticated and requires operator/container recovery; do not clear, evade, or attempt to recover it yourself.
 
 Do not:
 - broaden the task

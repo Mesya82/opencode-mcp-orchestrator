@@ -32,6 +32,21 @@ function docker(args) {
   )
 }
 
+function assertDockerSupervisorPython(container) {
+  const setup = docker([
+    "exec",
+    container,
+    "/bin/sh",
+    "-c",
+    "command -v python3 >/dev/null 2>&1 || exit 1; [ -x /usr/bin/python3 ] || { mkdir -p /usr/bin && ln -sf \"$(command -v python3)\" /usr/bin/python3; }; test -x /usr/bin/python3",
+  ])
+  assert.equal(
+    setup.status,
+    0,
+    setup.stderr || setup.stdout,
+  )
+}
+
 test(
   "cancelled managed container command is gone before writer-safe return",
   { skip: !enabled },
@@ -65,7 +80,7 @@ test(
           "--init",
           "--volume",
           workspace + ":/workspace",
-          "alpine:3.20",
+          "python:3.12-alpine",
           "sleep",
           "300",
         ])
@@ -75,6 +90,13 @@ test(
         0,
         started.stderr || started.stdout,
       )
+
+      const containerId =
+        String(started.stdout).trim()
+
+      assert.match(containerId, /^[0-9a-f]{64}$/)
+
+      assertDockerSupervisorPython(container)
 
       const controller =
         new AbortController()
@@ -86,7 +108,7 @@ test(
       const run =
         runManagedContainerProcess(
           "/usr/bin/docker",
-          container,
+          containerId,
           [
             "/bin/sh",
             "-c",
@@ -209,7 +231,7 @@ test(
           "--init",
           "--volume",
           workspace + ":/workspace",
-          "alpine:3.20",
+          "python:3.12-alpine",
           "sleep",
           "300",
         ])
@@ -220,6 +242,13 @@ test(
         started.stderr || started.stdout,
       )
 
+      const containerId =
+        String(started.stdout).trim()
+
+      assert.match(containerId, /^[0-9a-f]{64}$/)
+
+      assertDockerSupervisorPython(container)
+
       const activityPath =
         join(root, "activity")
       const lateFile =
@@ -228,7 +257,7 @@ test(
       const first =
         await runManagedContainerProcess(
           "/usr/bin/docker",
-          container,
+          containerId,
           [
             "/bin/sh",
             "-c",
@@ -263,68 +292,10 @@ test(
         "owned detached helper survived long enough to mutate the worktree",
       )
 
-      const staleToken =
-        "opencode-" + "a".repeat(32)
-      const stalePidFile =
-        join(workspace, "stale-helper.pid")
-
-      const staleHelper =
-        docker([
-          "exec",
-          container,
-          "/bin/sh",
-          "-c",
-          "export OPENCODE_MCP_MANAGED_TOKEN=\"$1\"; setsid sh -c 'echo $$ > /workspace/stale-helper.pid; sleep 30' </dev/null >/dev/null 2>&1 &",
-          "sh",
-          staleToken,
-        ])
-
-      assert.equal(
-        staleHelper.status,
-        0,
-        staleHelper.stderr || staleHelper.stdout,
-      )
-
-      const staleDeadline =
-        Date.now() + 5_000
-
-      while (
-        !existsSync(stalePidFile) &&
-        Date.now() < staleDeadline
-      ) {
-        await new Promise(
-          (resolve) => setTimeout(resolve, 25),
-        )
-      }
-
-      assert.ok(
-        existsSync(stalePidFile),
-        "stale owned helper did not start",
-      )
-
-      const stalePid =
-        readFileSync(
-          stalePidFile,
-          "utf8",
-        ).trim()
-
-      writeFileSync(
-        activityPath,
-        JSON.stringify({
-          version: 1,
-          container,
-          token: staleToken,
-        }) + "\n",
-        {
-          encoding: "utf8",
-          mode: 0o600,
-        },
-      )
-
       const second =
         await runManagedContainerProcess(
           "/usr/bin/docker",
-          container,
+          containerId,
           [
             "/bin/sh",
             "-c",
@@ -345,27 +316,10 @@ test(
         true,
       )
 
-      const staleProbe =
-        docker([
-          "exec",
-          container,
-          "/bin/sh",
-          "-c",
-          'test ! -d "/proc/$1"',
-          "sh",
-          stalePid,
-        ])
-
-      assert.equal(
-        staleProbe.status,
-        0,
-        staleProbe.stderr ||
-          staleProbe.stdout,
-      )
       assert.equal(
         existsSync(activityPath),
         false,
-        "stale activity marker was not recovered",
+        "creator marker was not removed after authenticated completion",
       )
       assert.equal(
         readFileSync(
@@ -380,6 +334,294 @@ test(
         "-f",
         container,
       ])
+
+      rmSync(
+        root,
+        {
+          recursive: true,
+          force: true,
+        },
+      )
+    }
+  },
+)
+
+test(
+  "env-scrubbed detached child is reaped before success",
+  { skip: !enabled },
+  async () => {
+    const root =
+      mkdtempSync(
+        join(tmpdir(), "container-scrub-integration-"),
+      )
+    const workspace =
+      join(root, "workspace")
+    const container =
+      "opencode-scrub-" +
+      process.pid +
+      "-" +
+      Date.now()
+
+    try {
+      spawnSync(
+        "/usr/bin/mkdir",
+        ["-p", workspace],
+        { encoding: "utf8" },
+      )
+
+      const started =
+        docker([
+          "run",
+          "-d",
+          "--rm",
+          "--name",
+          container,
+          "--init",
+          "--volume",
+          workspace + ":/workspace",
+          "python:3.12-alpine",
+          "sleep",
+          "300",
+        ])
+
+      assert.equal(
+        started.status,
+        0,
+        started.stderr || started.stdout,
+      )
+
+      const containerId =
+        String(started.stdout).trim()
+
+      assert.match(containerId, /^[0-9a-f]{64}$/)
+
+      assertDockerSupervisorPython(container)
+
+      const activityPath =
+        join(root, "activity")
+      const lateFile =
+        join(workspace, "scrubbed-late.txt")
+
+      const result =
+        await runManagedContainerProcess(
+          "/usr/bin/docker",
+          containerId,
+          [
+            "/bin/sh",
+            "-c",
+            "(env -u SCRUB_ME setsid sh -c 'sleep 1; echo late > /workspace/scrubbed-late.txt' </dev/null >/dev/null 2>&1 &)",
+          ],
+          "/workspace",
+          {
+            logPath: join(root, "scrub.log"),
+            activityPath,
+            logLimitBytes: 1024 * 1024,
+            timeoutMs: 15_000,
+          },
+        )
+
+      assert.equal(
+        result.terminationConfirmed,
+        true,
+      )
+      assert.equal(
+        existsSync(activityPath),
+        false,
+      )
+
+      await new Promise(
+        (resolve) => setTimeout(resolve, 1500),
+      )
+
+      assert.equal(
+        existsSync(lateFile),
+        false,
+        "env-scrubbed detached child survived subreaper cleanup",
+      )
+    } finally {
+      docker([
+        "rm",
+        "-f",
+        container,
+      ])
+
+      rmSync(
+        root,
+        {
+          recursive: true,
+          force: true,
+        },
+      )
+    }
+  },
+)
+
+test(
+  "pre-existing activity marker refuses without cross-kill",
+  { skip: !enabled },
+  async () => {
+    const root =
+      mkdtempSync(
+        join(tmpdir(), "container-refuse-integration-"),
+      )
+    const activityPath =
+      join(root, "activity")
+    const marker =
+      JSON.stringify({
+        version: 1,
+        container: "some-container",
+        token:
+          "opencode-" + "b".repeat(32),
+      }) + "\n"
+
+    try {
+      writeFileSync(
+        activityPath,
+        marker,
+        {
+          encoding: "utf8",
+          mode: 0o600,
+        },
+      )
+
+      await assert.rejects(
+        () =>
+          runManagedContainerProcess(
+            "/usr/bin/docker",
+            "some-container",
+            ["echo", "must-not-run"],
+            "/workspace",
+            {
+              logPath: join(root, "refused.log"),
+              activityPath,
+              logLimitBytes: 1024 * 1024,
+              timeoutMs: 10_000,
+            },
+          ),
+        /refused|quarantined/,
+      )
+
+      assert.equal(
+        readFileSync(
+          activityPath,
+          "utf8",
+        ),
+        marker,
+      )
+    } finally {
+      rmSync(
+        root,
+        {
+          recursive: true,
+          force: true,
+        },
+      )
+    }
+  },
+)
+
+test(
+  "rootless Podman managed command completes the supervisor protocol",
+  { skip: !podmanEnabled },
+  async () => {
+    assert.ok(
+      existsSync("/usr/bin/podman"),
+      "rootless Podman integration was enabled but /usr/bin/podman is missing",
+    )
+
+    const root =
+      mkdtempSync(
+        join(tmpdir(), "podman-managed-integration-"),
+      )
+    const container =
+      "opencode-podman-managed-" +
+      process.pid +
+      "-" +
+      Date.now()
+
+    try {
+      const started =
+        spawnSync(
+          "/usr/bin/podman",
+          [
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            container,
+            "python:3.12-alpine",
+            "sleep",
+            "60",
+          ],
+          {
+            encoding: "utf8",
+            timeout: 60_000,
+            env: process.env,
+          },
+        )
+
+      assert.equal(
+        started.status,
+        0,
+        started.stderr || started.stdout,
+      )
+
+      const containerId =
+        String(started.stdout).trim()
+
+      assert.match(containerId, /^[0-9a-f]{64}$/)
+
+      const activityPath =
+        join(root, "activity")
+
+      const result =
+        await runManagedContainerProcess(
+          "/usr/bin/podman",
+          containerId,
+          [
+            "/bin/sh",
+            "-c",
+            "echo podman-ok",
+          ],
+          "/",
+          {
+            logPath: join(root, "podman.log"),
+            activityPath,
+            logLimitBytes: 1024 * 1024,
+            timeoutMs: 30_000,
+          },
+        )
+
+      assert.equal(
+        result.terminationConfirmed,
+        true,
+      )
+      assert.equal(result.exitCode, 0)
+      assert.equal(
+        existsSync(activityPath),
+        false,
+      )
+      assert.match(
+        readFileSync(
+          join(root, "podman.log"),
+          "utf8",
+        ),
+        /podman-ok/,
+      )
+    } finally {
+      spawnSync(
+        "/usr/bin/podman",
+        [
+          "rm",
+          "-f",
+          container,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: process.env,
+        },
+      )
 
       rmSync(
         root,
@@ -416,7 +658,7 @@ test(
           "--rm",
           "--name",
           container,
-          "alpine:3.20",
+          "python:3.12-alpine",
           "sleep",
           "60",
         ],
@@ -547,7 +789,7 @@ test(
             "--rm",
             "--name",
             container,
-            "alpine:3.20",
+            "python:3.12-alpine",
             "sleep",
             "60",
           ],

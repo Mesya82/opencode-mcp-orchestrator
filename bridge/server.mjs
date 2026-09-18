@@ -6,7 +6,8 @@ import { readFile } from "node:fs/promises"
 import { rm } from "node:fs/promises"
 import { stat } from "node:fs/promises"
 import { writeFile } from "node:fs/promises"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { homedir } from "node:os"
 import { dirname } from "node:path"
 import { isAbsolute } from "node:path"
@@ -43,6 +44,12 @@ import {
   workerContainerActivityPath,
   workerContainerCapabilityPath,
 } from "../config/worker-container-capability.mjs"
+
+import {
+  WORKER_CONTAINER_CAPABILITY_VERSION,
+  resolveSelectedExistingContainer,
+  validateWorkerContainerCapability,
+} from "../config/existing-container-runtime.mjs"
 
 export const SERVER_VERSION_FALLBACK = "0.0.0-dev"
 
@@ -1184,6 +1191,7 @@ async function installWorkerContainerCapability(
   sessionID,
   directory,
   execution,
+  binding,
   overrides = {},
 ) {
   const root =
@@ -1226,14 +1234,29 @@ async function installWorkerContainerCapability(
     root,
   )
 
-  const capability = {
-    version: 1,
+  if (
+    !binding ||
+    typeof binding.runtime !== "string" ||
+    typeof binding.containerId !== "string" ||
+    binding.env === null ||
+    typeof binding.env !== "object"
+  ) {
+    throw new Error(
+      "selected existing container could not be pinned to an immutable runtime binding",
+    )
+  }
+
+  const capability = validateWorkerContainerCapability({
+    version: WORKER_CONTAINER_CAPABILITY_VERSION,
     container: execution.container,
+    containerId: binding.containerId,
+    runtime: binding.runtime,
+    runtimeEnv: binding.env,
     workspaceAccess: execution.workspaceAccess,
     containerCwd: execution.containerCwd,
     networkAccess: "inherit",
     hostCwd: directory,
-  }
+  })
 
   await writeFileFn(
     path,
@@ -1246,6 +1269,59 @@ async function installWorkerContainerCapability(
   )
 
   return path
+}
+
+async function resolveWorkerContainerBinding(
+  execution,
+  directory,
+  overrides = {},
+) {
+  const existsSyncFn =
+    overrides.existingContainerExistsSync ?? existsSync
+  const spawnSyncFn =
+    overrides.existingContainerSpawnSync ?? spawnSync
+  const runtimeEnvSource =
+    overrides.existingContainerEnv ?? overrides.env ?? process.env
+  const resolveBinding =
+    overrides.resolveExistingContainerBinding ??
+    ((name) =>
+      resolveSelectedExistingContainer(name, {
+        existsSync: existsSyncFn,
+        spawnSync: spawnSyncFn,
+        env: runtimeEnvSource,
+      }))
+
+  const binding = await resolveBinding(execution.container)
+
+  if (
+    !binding ||
+    typeof binding.runtime !== "string" ||
+    typeof binding.containerId !== "string" ||
+    binding.env === null ||
+    typeof binding.env !== "object"
+  ) {
+    throw new Error(
+      "selected existing container could not be pinned to an immutable runtime binding",
+    )
+  }
+
+  const capability = validateWorkerContainerCapability({
+    version: WORKER_CONTAINER_CAPABILITY_VERSION,
+    container: execution.container,
+    containerId: binding.containerId,
+    runtime: binding.runtime,
+    runtimeEnv: binding.env,
+    workspaceAccess: execution.workspaceAccess,
+    containerCwd: execution.containerCwd,
+    networkAccess: "inherit",
+    hostCwd: directory,
+  })
+
+  return {
+    runtime: capability.runtime,
+    containerId: capability.containerId,
+    env: capability.runtimeEnv,
+  }
 }
 
 async function removeWorkerContainerCapability(
@@ -1521,6 +1597,16 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
   try {
     work = (async () => {
+      const workerContainerBinding =
+        role === "worker" &&
+        overrides.workerExecution?.kind === "existing_container"
+          ? await resolveWorkerContainerBinding(
+              overrides.workerExecution,
+              directory,
+              overrides,
+            )
+          : undefined
+
       const client = sessionClient ?? await getClient(overrides)
 
       sessionClient = client
@@ -1576,6 +1662,7 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
           sessionID,
           directory,
           overrides.workerExecution,
+          workerContainerBinding,
           overrides,
         )
       }

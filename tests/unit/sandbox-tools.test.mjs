@@ -1,8 +1,10 @@
 import assert from "node:assert/strict"
 import { spawnSync } from "node:child_process"
+import { EventEmitter } from "node:events"
 import { chmodSync, existsSync, lstatSync, mkdtempSync, mkdirSync, rmSync, statSync, utimesSync, writeFileSync, symlinkSync, readFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { delimiter, dirname, join } from "node:path"
+import { PassThrough } from "node:stream"
 import { fileURLToPath } from "node:url"
 import test from "node:test"
 
@@ -39,7 +41,17 @@ import sandboxPlugin, {
   buildContainerExecArgs,
   containerRunInputSchema,
   containerRuntimeEnv,
+  isSupervisorToken,
+  runManagedContainerProcess,
+  __clearContainerRunChainsForTests,
+  MANAGED_CONTAINER_SUPERVISOR_SCRIPT,
+  SUPERVISOR_DONE_PREFIX,
+  SUPERVISOR_ERROR_PREFIX,
+  SUPERVISOR_GO_PREFIX,
+  SUPERVISOR_READY_LINE,
+  SUPERVISOR_STOP_PREFIX,
   readWorkerContainerCapability,
+  inspectPinnedExistingContainer,
   runCancellableLoggedProcess,
   resolveContainerRunWorkdir,
   resolveSandboxLogSpawnResult,
@@ -170,12 +182,26 @@ test("Muse final request also permits an omitted tools field", async () => {
   })
 })
 
+test("Muse final request does not depend on unstable hook kind or agent metadata", async () => {
+  for (const inputOverrides of [
+    { kind: "compaction" },
+    { agent: "ordinary-agent" },
+    {
+      kind: undefined,
+      agent: undefined,
+      model: { providerID: "opencode" },
+    },
+  ]) {
+    const { input } = museFinalRequest({ input: inputOverrides })
+    assert.equal(
+      await omitUnsupportedMuseFinalToolChoice(input),
+      true,
+    )
+  }
+})
+
 test("Muse final request compatibility rewrite fails closed", async () => {
   const cases = [
-    {
-      name: "ordinary agent",
-      input: { agent: "ordinary-agent" },
-    },
     {
       name: "other provider",
       input: {
@@ -187,16 +213,11 @@ test("Muse final request compatibility rewrite fails closed", async () => {
     },
     {
       name: "other model",
-      input: {
-        model: {
-          providerID: "opencode",
-          id: "different-model",
-        },
+      body: {
+        model: "different-model",
+        tools: [],
+        tool_choice: "none",
       },
-    },
-    {
-      name: "auxiliary request",
-      input: { kind: "compaction" },
     },
     {
       name: "tools still present",
@@ -336,9 +357,10 @@ test("container_run schema cannot select or broaden the parent-selected containe
 })
 
 test("container exec argv keeps runtime options before the fixed container and command argv after it", () => {
+  const id = "a".repeat(64)
   assert.deepEqual(
     buildContainerExecArgs(
-      "dev-box",
+      id,
       ["printf", "%s", "--privileged", "a b"],
       "/workspace",
     ),
@@ -346,12 +368,17 @@ test("container exec argv keeps runtime options before the fixed container and c
       "exec",
       "--workdir",
       "/workspace",
-      "dev-box",
+      id,
       "printf",
       "%s",
       "--privileged",
       "a b",
     ],
+  )
+
+  assert.throws(
+    () => buildContainerExecArgs(id, ["true"], "relative"),
+    /absolute path/,
   )
 })
 
@@ -540,7 +567,10 @@ test("existing-container admission fails closed on malformed security fields", (
 
 test("container cwd auto mode maps the canonical host worktree through inspected mounts", () => {
   const capability = {
-    version: 1,
+    version: 2,
+    containerId: "a".repeat(64),
+    runtime: "/usr/bin/podman",
+    runtimeEnv: { PATH: "/usr/bin:/bin" },
     container: "dev-box",
     workspaceAccess: "writable",
     containerCwd: "auto",
@@ -573,7 +603,10 @@ test("container cwd auto mode maps the canonical host worktree through inspected
 
 test("container cwd auto mode refuses same-named but unproven container directories", () => {
   const capability = {
-    version: 1,
+    version: 2,
+    containerId: "a".repeat(64),
+    runtime: "/usr/bin/podman",
+    runtimeEnv: { PATH: "/usr/bin:/bin" },
     container: "dev-box",
     workspaceAccess: "writable",
     containerCwd: "auto",
@@ -610,7 +643,10 @@ test("writable auto mapping rejects a read-only workspace mount", () => {
   assert.throws(
     () => resolveContainerRunWorkdir(
       {
-        version: 1,
+        version: 2,
+        containerId: "a".repeat(64),
+        runtime: "/usr/bin/podman",
+        runtimeEnv: { PATH: "/usr/bin:/bin" },
         container: "dev-box",
         workspaceAccess: "writable",
         containerCwd: "auto",
@@ -694,6 +730,7 @@ test("runtime resolution is fixed by host admission rather than model input", ()
       return {
         status: 0,
         stdout: JSON.stringify([{
+          Id: "a".repeat(64),
           State: { Running: true },
           HostConfig: { Privileged: false, PidMode: "" },
           Mounts: [],
@@ -732,8 +769,11 @@ test("worker container capability is session-bound and validates stored state", 
       assert.equal(path, "/tmp/test-cap-root/ses_test.json")
       assert.equal(encoding, "utf8")
       return JSON.stringify({
-        version: 1,
+        version: 2,
         container: "dev-box",
+        containerId: "a".repeat(64),
+        runtime: "/usr/bin/podman",
+        runtimeEnv: { PATH: "/usr/bin:/bin" },
         workspaceAccess: "writable",
         containerCwd: "auto",
         networkAccess: "inherit",
@@ -743,6 +783,8 @@ test("worker container capability is session-bound and validates stored state", 
   })
 
   assert.equal(cap.container, "dev-box")
+  assert.equal(cap.containerId, "a".repeat(64))
+  assert.equal(cap.runtime, "/usr/bin/podman")
   assert.equal(cap.networkAccess, "inherit")
   assert.throws(
     () => readWorkerContainerCapability("bad/session", {
@@ -2403,4 +2445,496 @@ test("resolveGitStatusOutput preserves timeout errors and rejects bad shapes", (
   assert.throws(() => resolveGitStatusOutput({ status: 1, signal: null, stdout: "" }), /exit 1/)
   assert.throws(() => resolveGitStatusOutput({ status: 0, signal: null, stdout: 42 }), /unusable output/)
   assert.equal(resolveGitStatusOutput({ status: 0, signal: null, stdout: "" }), "")
+})
+
+function makeManagedScratch(t, prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  return {
+    dir,
+    logPath: join(dir, "combined.log"),
+    activityPath: join(dir, "activity"),
+  }
+}
+
+function fakeContainerSpawn(drive) {
+  const calls = []
+  const spawnFn = (command, args, options) => {
+    const child = new EventEmitter()
+    const stdin = new PassThrough()
+    const stdout = new PassThrough()
+    const stderr = new PassThrough()
+    child.stdin = stdin
+    child.stdout = stdout
+    child.stderr = stderr
+    child.kill = () => {
+      child.killed = true
+      setImmediate(() => child.emit("close", null, null))
+      return true
+    }
+    const call = { command, args, options, child, stdin, stdout, stderr }
+    calls.push(call)
+    setImmediate(() => drive(call))
+    return child
+  }
+  return { spawnFn, calls }
+}
+
+function stdinLines(stdin, onLine) {
+  let buffer = ""
+  stdin.on("data", (chunk) => {
+    buffer += chunk.toString("utf8")
+    let index = buffer.indexOf("\n")
+    while (index >= 0) {
+      const line = buffer.slice(0, index)
+      buffer = buffer.slice(index + 1)
+      onLine(line)
+      index = buffer.indexOf("\n")
+    }
+  })
+}
+
+function managedOptions(scratch, overrides = {}) {
+  return {
+    logPath: scratch.logPath,
+    activityPath: scratch.activityPath,
+    logLimitBytes: 1024 * 1024,
+    timeoutMs: 5000,
+    runtimeEnv: { PATH: "/usr/bin:/bin" },
+    stopGraceMs: 200,
+    ...overrides,
+  }
+}
+
+test("subreaper supervisor handshake succeeds and removes only the creator marker", async (t) => {
+  const scratch = makeManagedScratch(t, "supervisor-ok-")
+  let goToken
+  const { spawnFn, calls } = fakeContainerSpawn(({ args, stdin, stdout, stderr, child }) => {
+    assert.ok(args.includes("python3"))
+    assert.ok(args.includes("-c"))
+    const scriptIndex = args.indexOf("-c") + 1
+    assert.ok(args[scriptIndex].includes("prctl(36, 1"))
+    assert.ok(args[scriptIndex].includes("os.dup2(devnull, 0)"))
+    stdout.write(`${SUPERVISOR_READY_LINE}\n`)
+    stdinLines(stdin, (line) => {
+      if (line.startsWith(`${SUPERVISOR_GO_PREFIX} `)) {
+        goToken = line.split(" ", 2)[1]
+        stdout.write("hello from command\n")
+        stderr.write(`${SUPERVISOR_DONE_PREFIX} ${goToken} 3\n`)
+        setImmediate(() => child.emit("close", 0, null))
+      }
+    })
+  })
+
+  const result = await runManagedContainerProcess(
+    "/usr/bin/docker",
+    "a".repeat(64),
+    ["sh", "-c", "echo hi"],
+    "/workspace",
+    managedOptions(scratch, { spawnFn }),
+  )
+
+  assert.equal(result.terminationConfirmed, true)
+  assert.equal(result.exitCode, 3)
+  assert.equal(result.timedOut, false)
+  assert.equal(result.aborted, false)
+  assert.equal(result.spawnError, undefined)
+  assert.equal(existsSync(scratch.activityPath), false)
+  assert.ok(isSupervisorToken(goToken))
+  assert.match(readFileSync(scratch.logPath, "utf8"), /hello from command/)
+  // The fresh control token authenticates completion but is never logged.
+  assert.ok(!readFileSync(scratch.logPath, "utf8").includes(goToken))
+  // The user command argv follows the supervisor script without any token.
+  const execArgs = calls[0].args
+  const afterScript = execArgs.slice(execArgs.indexOf("-c") + 2)
+  assert.deepEqual(afterScript, ["sh", "-c", "echo hi"])
+  assert.ok(!execArgs.some((arg) => typeof arg === "string" && goToken !== undefined && arg.includes(goToken)))
+})
+
+test("runtime exit 0 without ready/completion is a quarantined error, not success", async (t) => {
+  const scratch = makeManagedScratch(t, "supervisor-false-success-")
+  const { spawnFn } = fakeContainerSpawn(({ child }) => {
+    // Rootless-Podman setsid fork/return-0 shape: exit 0, no handshake.
+    setImmediate(() => child.emit("close", 0, null))
+  })
+
+  const result = await runManagedContainerProcess(
+    "/usr/bin/podman",
+    "a".repeat(64),
+    ["echo", "never-ran"],
+    "/workspace",
+    managedOptions(scratch, { spawnFn }),
+  )
+
+  assert.equal(result.terminationConfirmed, false)
+  assert.equal(result.exitCode, 1)
+  assert.ok(result.spawnError)
+  assert.match(result.spawnError.message, /handshake|never ran/)
+  assert.equal(existsSync(scratch.activityPath), true)
+})
+
+test("malformed ready line and supervisor errors fail closed with marker retained", async (t) => {
+  for (const [name, drive] of [
+    ["garbage-ready", ({ stdout, child }) => {
+      stdout.write("not-the-handshake\n")
+      setImmediate(() => child.emit("close", 0, null))
+    }],
+    ["subreaper-unavailable", ({ stderr, child }) => {
+      stderr.write(`${SUPERVISOR_ERROR_PREFIX} subreaper-unavailable\n`)
+      setImmediate(() => child.emit("close", 126, null))
+    }],
+  ]) {
+    const scratch = makeManagedScratch(t, `supervisor-bad-${name}-`)
+    const { spawnFn } = fakeContainerSpawn(drive)
+    const result = await runManagedContainerProcess(
+      "/usr/bin/docker",
+      "a".repeat(64),
+      ["true"],
+      "/workspace",
+      managedOptions(scratch, { spawnFn }),
+    )
+    assert.equal(result.terminationConfirmed, false, name)
+    assert.ok(result.spawnError, name)
+    assert.equal(existsSync(scratch.activityPath), true, name)
+  }
+})
+
+test("completion with an unknown token is ignored and quarantines", async (t) => {
+  const scratch = makeManagedScratch(t, "supervisor-spoof-")
+  const { spawnFn } = fakeContainerSpawn(({ stdin, stdout, stderr, child }) => {
+    stdout.write(`${SUPERVISOR_READY_LINE}\n`)
+    stdinLines(stdin, (line) => {
+      if (line.startsWith(`${SUPERVISOR_GO_PREFIX} `)) {
+        // A descendant guessing at the completion frame cannot know
+        // the fresh token; the wrong token must not authenticate.
+        stderr.write(`${SUPERVISOR_DONE_PREFIX} opencode-ffffffffffffffffffffffffffffffff 0\n`)
+        setImmediate(() => child.emit("close", 0, null))
+      }
+    })
+  })
+
+  const result = await runManagedContainerProcess(
+    "/usr/bin/docker",
+    "a".repeat(64),
+    ["true"],
+    "/workspace",
+    managedOptions(scratch, { spawnFn }),
+  )
+
+  assert.equal(result.terminationConfirmed, false)
+  assert.ok(result.spawnError)
+  assert.equal(existsSync(scratch.activityPath), true)
+})
+
+test("confirmed cancellation removes the creator marker; stop timeout quarantines", async (t) => {
+  const confirmed = makeManagedScratch(t, "supervisor-cancel-ok-")
+  const controller = new AbortController()
+  const { spawnFn: confirmSpawn } = fakeContainerSpawn(({ stdin, stdout, stderr, child }) => {
+    stdout.write(`${SUPERVISOR_READY_LINE}\n`)
+    stdinLines(stdin, (line) => {
+      if (line.startsWith(`${SUPERVISOR_GO_PREFIX} `)) {
+        const token = line.split(" ", 2)[1]
+        setImmediate(() => controller.abort())
+      } else if (line.startsWith(`${SUPERVISOR_STOP_PREFIX} `)) {
+        const token = line.split(" ", 2)[1]
+        stderr.write(`${SUPERVISOR_DONE_PREFIX} ${token} 130\n`)
+        setImmediate(() => child.emit("close", 130, null))
+      }
+    })
+  })
+
+  const cancelled = await runManagedContainerProcess(
+    "/usr/bin/docker",
+    "a".repeat(64),
+    ["sleep", "30"],
+    "/workspace",
+    managedOptions(confirmed, { spawnFn: confirmSpawn, signal: controller.signal }),
+  )
+  assert.equal(cancelled.aborted, true)
+  assert.equal(cancelled.terminationConfirmed, true)
+  assert.equal(cancelled.exitCode, 130)
+  assert.equal(existsSync(confirmed.activityPath), false)
+
+  const hung = makeManagedScratch(t, "supervisor-cancel-hung-")
+  const hungController = new AbortController()
+  const { spawnFn: hungSpawn } = fakeContainerSpawn(({ stdin, stdout, child }) => {
+    stdout.write(`${SUPERVISOR_READY_LINE}\n`)
+    stdinLines(stdin, (line) => {
+      if (line.startsWith(`${SUPERVISOR_GO_PREFIX} `)) {
+        setImmediate(() => hungController.abort())
+      }
+      // STOP frame is ignored: hung supervisor, no completion.
+    })
+  })
+
+  const hungResult = await runManagedContainerProcess(
+    "/usr/bin/docker",
+    "a".repeat(64),
+    ["sleep", "30"],
+    "/workspace",
+    managedOptions(hung, { spawnFn: hungSpawn, signal: hungController.signal, stopGraceMs: 100 }),
+  )
+  assert.equal(hungResult.aborted, true)
+  assert.equal(hungResult.terminationConfirmed, false)
+  assert.ok(hungResult.spawnError)
+  assert.equal(existsSync(hung.activityPath), true)
+})
+
+test("pre-existing activity marker refuses without cross-kill or deletion", async (t) => {
+  const scratch = makeManagedScratch(t, "supervisor-refuse-")
+  const marker = JSON.stringify({ version: 1, container: "dev-box", token: "opencode-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }) + "\n"
+  writeFileSync(scratch.activityPath, marker, { mode: 0o600 })
+  let spawned = false
+  const spawnFn = () => {
+    spawned = true
+    throw new Error("must not spawn while quarantined")
+  }
+
+  await assert.rejects(
+    () => runManagedContainerProcess("/usr/bin/docker", "dev-box", ["true"], "/workspace", managedOptions(scratch, { spawnFn })),
+    /refused|quarantined/,
+  )
+  assert.equal(spawned, false)
+  assert.equal(readFileSync(scratch.activityPath, "utf8"), marker)
+})
+
+test("same-session invocations serialize without cross-marker deletion", async (t) => {
+  __clearContainerRunChainsForTests()
+  const scratch = makeManagedScratch(t, "supervisor-serial-")
+  let active = 0
+  let maxActive = 0
+  const { spawnFn } = fakeContainerSpawn(({ stdin, stdout, stderr, child }) => {
+    active += 1
+    maxActive = Math.max(maxActive, active)
+    // Each invocation gets its own marker file, recreated after the
+    // previous holder removes it; overlap would mean parallel runs.
+    stdout.write(`${SUPERVISOR_READY_LINE}\n`)
+    stdinLines(stdin, (line) => {
+      if (line.startsWith(`${SUPERVISOR_GO_PREFIX} `)) {
+        const token = line.split(" ", 2)[1]
+        setTimeout(() => {
+          stderr.write(`${SUPERVISOR_DONE_PREFIX} ${token} 0\n`)
+          active -= 1
+          setImmediate(() => child.emit("close", 0, null))
+        }, 100)
+      }
+    })
+  })
+
+  const secondScratchLog = join(scratch.dir, "second.log")
+  const [first, second] = await Promise.all([
+    runManagedContainerProcess("/usr/bin/docker", "a".repeat(64), ["echo", "one"], "/workspace", managedOptions(scratch, { spawnFn })),
+    runManagedContainerProcess("/usr/bin/docker", "a".repeat(64), ["echo", "two"], "/workspace", managedOptions({ ...scratch, logPath: secondScratchLog }, { spawnFn })),
+  ])
+
+  // Same activityPath serializes: the second call waits for the first
+  // marker to clear rather than treating it as stale.
+  assert.equal(first.terminationConfirmed, true)
+  assert.equal(second.terminationConfirmed, true)
+  assert.equal(maxActive, 1)
+  assert.equal(existsSync(scratch.activityPath), false)
+})
+
+test("managed lifecycle performs no env-token ownership or snapshot recovery", () => {
+  const source = readFileSync(pluginPath, "utf8")
+  assert.ok(!source.includes("OPENCODE_MCP_MANAGED_TOKEN"))
+  assert.ok(!source.includes("MANAGED_CONTAINER_CLEANUP_OWNED"))
+  assert.ok(!source.includes("MANAGED_CONTAINER_LAUNCHER"))
+  assert.ok(!source.includes("MANAGED_CONTAINER_WRAPPER"))
+  assert.ok(!source.includes("recoverManagedContainerActivity"))
+  assert.ok(!source.includes("cleanupOwnedContainerProcesses"))
+  assert.ok(!source.includes("/proc/*/environ"))
+  assert.ok(source.includes("MANAGED_CONTAINER_SUPERVISOR_SCRIPT"))
+  assert.ok(source.includes("SUPERVISOR_STOP_GRACE_MS"))
+  assert.ok(source.includes("PR_SET_CHILD_SUBREAPER") || source.includes("prctl(36, 1"))
+  assert.ok(source.includes("setsid"))
+  assert.ok(source.includes("execvp"))
+  assert.ok(source.includes("/children"))
+  assert.ok(source.includes("cleanup-incomplete"))
+  assert.equal(SUPERVISOR_READY_LINE, "OPENCODE_SUPERVISOR_READY")
+})
+
+test("worker container capability version 2 pins immutable runtime binding", () => {
+  const id = "a".repeat(64)
+  const cap = readWorkerContainerCapability("ses_pin", {
+    root: "/tmp/test-cap-root",
+    readFileSync: () => JSON.stringify({
+      version: 2,
+      container: "dev-box",
+      containerId: id,
+      runtime: "/usr/bin/podman",
+      runtimeEnv: { PATH: "/usr/bin:/bin" },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: "/home/me/project",
+    }),
+  })
+  assert.equal(cap.containerId, id)
+  assert.equal(cap.runtime, "/usr/bin/podman")
+
+  for (const bad of [
+    {
+      version: 1,
+      container: "dev-box",
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: "/home/me/project",
+    },
+    {
+      version: 2,
+      container: "dev-box",
+      containerId: id,
+      runtime: "/usr/bin/podman",
+      runtimeEnv: { PATH: "/usr/bin:/bin" },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: "/home/me/project",
+      extra: true,
+    },
+    {
+      version: 2,
+      container: "dev-box",
+      containerId: "short",
+      runtime: "/usr/bin/podman",
+      runtimeEnv: { PATH: "/usr/bin:/bin" },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: "/home/me/project",
+    },
+    {
+      version: 2,
+      container: "dev-box",
+      containerId: id,
+      runtime: "/tmp/evil-runtime",
+      runtimeEnv: { PATH: "/usr/bin:/bin" },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: "/home/me/project",
+    },
+    {
+      version: 2,
+      container: "dev-box",
+      containerId: id,
+      runtime: "/usr/bin/podman",
+      runtimeEnv: { PATH: "/usr/bin:/bin", EVIL: "1" },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: "/home/me/project",
+    },
+  ]) {
+    assert.throws(
+      () => readWorkerContainerCapability("ses_pin", {
+        root: "/tmp/test-cap-root",
+        readFileSync: () => JSON.stringify(bad),
+      }),
+      /invalid worker container capability/,
+    )
+  }
+})
+
+test("pinned existing-container inspection uses only the pinned ID and endpoint", () => {
+  const id = "c".repeat(64)
+  const inspectDoc = JSON.stringify([{
+    Id: id,
+    State: { Running: true },
+    HostConfig: { Privileged: false, PidMode: "" },
+    Mounts: [],
+  }])
+  const calls = []
+  const bound = inspectPinnedExistingContainer(
+    {
+      runtime: "/usr/bin/podman",
+      containerId: id,
+      runtimeEnv: {
+        PATH: "/usr/bin:/bin",
+        CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
+      },
+    },
+    {
+      spawnSync: (command, argv, options) => {
+        calls.push([command, argv, options.env])
+        return { status: 0, stdout: inspectDoc }
+      },
+    },
+  )
+  assert.equal(bound.containerId, id)
+  assert.deepEqual(calls[0].slice(0, 2), ["/usr/bin/podman", ["inspect", id]])
+  assert.equal(calls[0][2].CONTAINER_HOST, "unix:///run/user/1000/podman/podman.sock")
+
+  assert.throws(
+    () => inspectPinnedExistingContainer(
+      {
+        runtime: "/usr/bin/podman",
+        containerId: id,
+        runtimeEnv: { PATH: "/usr/bin:/bin" },
+      },
+      {
+        spawnSync: () => ({
+          status: 0,
+          stdout: JSON.stringify([{
+            Id: "d".repeat(64),
+            State: { Running: true },
+            HostConfig: { Privileged: false, PidMode: "" },
+            Mounts: [],
+          }]),
+        }),
+      },
+    ),
+    /identity changed/,
+  )
+
+  assert.throws(
+    () => inspectPinnedExistingContainer(
+      {
+        runtime: "/usr/bin/podman",
+        containerId: id,
+        runtimeEnv: { PATH: "/usr/bin:/bin" },
+      },
+      {
+        spawnSync: () => ({
+          status: 0,
+          stdout: JSON.stringify([{
+            Id: id,
+            State: { Running: false },
+            HostConfig: { Privileged: false, PidMode: "" },
+            Mounts: [],
+          }]),
+        }),
+      },
+    ),
+    /not running/,
+  )
+})
+
+test("selected-name resolution ambiguity fails closed before execution", () => {
+  const id = "e".repeat(64)
+  const doc = JSON.stringify([{
+    Id: id,
+    State: { Running: true },
+    HostConfig: { Privileged: false, PidMode: "" },
+    Mounts: [],
+  }])
+  assert.throws(
+    () => resolveExistingContainerRuntime("dev-box", {
+      existsSync: () => true,
+      env: {},
+      spawnSync: () => ({ status: 0, stdout: doc }),
+    }),
+    /ambiguous/,
+  )
+})
+
+test("container exec argv carries the immutable ID, never the display name", () => {
+  const id = "f".repeat(64)
+  assert.deepEqual(
+    buildContainerExecArgs(id, ["echo", "hi"], "/workspace"),
+    ["exec", "--workdir", "/workspace", id, "echo", "hi"],
+  )
+  assert.throws(() => buildContainerExecArgs("dev-box", ["echo"]), /invalid existing container ID/)
 })

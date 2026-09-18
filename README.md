@@ -108,7 +108,15 @@ The interactive installer then:
 7. lets the user select integrations
 8. renders and installs the OpenCode agents plus sandbox plugin
 9. installs MCP and skill integrations for the requested configuration
-10. runs the installation doctor
+10. restarts the OpenCode service when the managed plugin generation changed
+11. runs the installation doctor
+
+The lower-level `install-opencode.mjs` component can also be run on its own.
+When it changes the plugin it persists and prints `OPENCODE_RESTART_REQUIRED`;
+the full setup consumes that marker only after `opencode2 service restart`
+succeeds; rerun full setup to activate a lower-level install. This prevents an
+on-disk update from being reported healthy while a
+long-lived service still has the previous plugin loaded.
 
 ## Model selection
 
@@ -440,8 +448,12 @@ The default remains the existing isolated sandbox. For
 reported as `"inherit"`. Auto cwd resolution derives the container destination
 from the inspected mount table using the canonical host worktree as the source;
 if no mount proves that mapping, the call fails and the parent must provide an
-explicit absolute `container_cwd`. The bridge binds the selected container to
-the OpenCode session before prompting the Worker. The model-visible
+explicit absolute `container_cwd`. Before creating the OpenCode session, the
+bridge resolves the display name exactly once and pins the immutable container
+ID, fixed runtime executable, and validated runtime environment. Every run
+re-inspects that ID through the pinned runtime, repeats admission checks, and
+never resolves the display name again. Ambient `CONTAINER_HOST` or path changes
+therefore cannot redirect an established session. The model-visible
 `container_run` tool accepts only an argv array, optional absolute workdir, and
 timeout; it has no container/runtime/network selector and does not expose
 Podman/Docker binaries or sockets as general-purpose tools.
@@ -456,28 +468,33 @@ rootless Docker/Podman/containerd/CRI-O administration sockets even when the
 destination is renamed or the bind is read-only.
 
 Runtime discovery uses only fixed Docker/Podman executable paths plus a
-validated local runtime environment. Rootless Podman may use
+validated local runtime environment. A name that is missing or ambiguous
+across the supported runtimes, a malformed identity, a stopped container, or a
+failed admission check is rejected before Worker execution. Rootless Podman may use
 `CONTAINER_HOST`, but only the form `unix:///absolute/canonical/path` is
 accepted; remote transports are rejected. The resolved runtime environment is
-captured once and reused for inspect, exec, cleanup, and verification.
+captured once and reused for inspect, exec, supervision, and verification.
 
 `container_run` has a deliberately bounded process-lifecycle contract.
-Ordinary descendants inherit a per-invocation ownership token, and any
-token-owned processes still running when the command finishes, times out, or
-is cancelled are killed and verified gone before the activity marker is
-cleared. This means build helpers such as a Gradle daemon started by a
-`container_run` call are not persistent across calls; use services that were
-already running in the selected development container when persistence is
-required. Deliberately erasing the ownership token and escaping this boundary
-is unsupported. If owned-process cleanup cannot be confirmed, the activity
-marker is retained and writable delegation remains fail-closed; a later
-`container_run` first attempts bounded stale-marker recovery before starting
-new work.
+The selected container must provide Linux `prctl` subreaper support and
+`python3`; the tool probes those requirements automatically and fails closed
+when they are unavailable. A small authenticated supervisor becomes a child
+subreaper, starts the command in a fresh session, and reaps all adopted
+descendants before reporting completion. Build helpers such as a Gradle daemon
+started by a `container_run` call are therefore not persistent across calls;
+use services that were already running in the selected development container
+when persistence is required. Calls for the same Worker session are serialized.
+If the supervisor crashes, its protocol cannot be authenticated, or cleanup
+cannot be confirmed, the activity marker is retained and writable delegation
+remains quarantined. There is no cross-run stale-marker recovery or process
+killing: an operator must inspect/recover the selected container and clear the
+quarantine deliberately.
 
-The parent remains responsible for selecting an appropriate existing
-development container. `workspace_access` describes intended project mutation
-semantics; it cannot remove unrelated capabilities from a pre-existing
-container.
+The parent remains responsible for selecting and trusting an appropriate
+existing development container. Admission blocks a bounded set of dangerous
+configurations; it does not sandbox away mounts, devices, credentials,
+services, networking, or other capabilities already present in that container.
+`workspace_access` describes intended project mutation semantics only.
 
 ### Runner
 

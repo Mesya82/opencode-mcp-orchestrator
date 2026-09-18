@@ -101,6 +101,7 @@ function installManagedFile({
   destination,
   state,
   content,
+  beforeChange,
 }) {
   const sourceHash =
     createHash("sha256")
@@ -131,7 +132,7 @@ function installManagedFile({
         `UNCHANGED  ${destination}`,
       )
 
-      return
+      return "unchanged"
     }
 
     /*
@@ -144,6 +145,8 @@ function installManagedFile({
       previous &&
       previous.sha256 === currentHash
     ) {
+      beforeChange?.()
+
       mkdirSync(
         dirname(destination),
         {
@@ -173,7 +176,7 @@ function installManagedFile({
         `UPDATED    ${destination}`,
       )
 
-      return
+      return "updated"
     }
 
     throw new Error(
@@ -186,6 +189,8 @@ function installManagedFile({
       ].join("\n"),
     )
   }
+
+  beforeChange?.()
 
   mkdirSync(
     dirname(destination),
@@ -215,6 +220,8 @@ function installManagedFile({
   console.log(
     `INSTALLED  ${destination}`,
   )
+
+  return "installed"
 }
 
 const args =
@@ -288,6 +295,35 @@ const opencodeConfig =
 
 const state =
   loadState(statePath)
+
+const serviceRestartRequiredPath =
+  resolve(
+    appConfig,
+    "opencode-service-restart-required",
+  )
+
+let pluginChanged = false
+
+function markServiceRestartRequired() {
+  mkdirSync(
+    appConfig,
+    {
+      recursive: true,
+      mode: 0o700,
+    },
+  )
+
+  writeFileSync(
+    serviceRestartRequiredPath,
+    "OpenCode plugin generation changed; service activation required.\n",
+    { mode: 0o600 },
+  )
+
+  chmodSync(
+    serviceRestartRequiredPath,
+    0o600,
+  )
+}
 
 const files = [
   {
@@ -456,11 +492,18 @@ for (const file of files) {
         )
       : source
 
-  installManagedFile({
+  const installStatus = installManagedFile({
     ...file,
     state,
     content,
+    ...(!file.role
+      ? { beforeChange: markServiceRestartRequired }
+      : {}),
   })
+
+  if (!file.role && installStatus !== "unchanged") {
+    pluginChanged = true
+  }
 }
 
 mkdirSync(
@@ -487,6 +530,14 @@ chmodSync(
   statePath,
   0o600,
 )
+
+if (pluginChanged) {
+  console.log()
+  console.log("OPENCODE_RESTART_REQUIRED")
+  console.log(
+    "Run the full orchestrator setup to restart OpenCode and clear the activation marker.",
+  )
+}
 
 console.log()
 console.log(

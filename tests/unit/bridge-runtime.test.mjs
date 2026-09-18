@@ -1459,6 +1459,11 @@ test("late container capability creation is removed after timeout cleanup", asyn
         model: stubModel,
         timeoutMs: 30,
         workerContainerCapabilityRoot: join(dir, "caps"),
+        resolveExistingContainerBinding: async () => ({
+          runtime: "/usr/bin/podman",
+          containerId: "a".repeat(64),
+          env: { PATH: "/usr/bin:/bin" },
+        }),
         workerExecution: {
           kind: "existing_container",
           container: "dev-box",
@@ -1499,6 +1504,110 @@ test("late container capability creation is removed after timeout cleanup", asyn
   resetBridgeStateForTests()
 })
 
+test("existing-container admission pins a validated capability before session creation", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-binding-", async (dir) => {
+    const { calls, client } = makeFakeClient()
+    let writtenCapability
+    let resolvedNames = []
+
+    const result = await runAgent(
+      dir,
+      "container worker task",
+      "opencode-orchestrator-worker-container",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 5000,
+        workerContainerCapabilityRoot: join(dir, "caps"),
+        resolveExistingContainerBinding: async (name) => {
+          resolvedNames.push(name)
+          return {
+            runtime: "/usr/bin/podman",
+            containerId: "b".repeat(64),
+            env: {
+              PATH: "/usr/bin:/bin",
+              CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
+            },
+          }
+        },
+        writeFile: async (_path, data) => {
+          writtenCapability = JSON.parse(String(data))
+        },
+        workerExecution: {
+          kind: "existing_container",
+          container: "dev-box",
+          workspaceAccess: "writable",
+          containerCwd: "auto",
+          networkAccess: "inherit",
+        },
+      },
+    )
+
+    assert.equal(result, "hello")
+    assert.deepEqual(resolvedNames, ["dev-box"])
+    assert.equal(callNames(calls, "create").length, 1)
+    assert.deepEqual(writtenCapability, {
+      version: 2,
+      container: "dev-box",
+      containerId: "b".repeat(64),
+      runtime: "/usr/bin/podman",
+      runtimeEnv: {
+        PATH: "/usr/bin:/bin",
+        CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
+      },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: dir,
+    })
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("invalid immutable binding fails before Worker session creation", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-binding-invalid-", async (dir) => {
+    const { calls, client } = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "container worker task",
+        "opencode-orchestrator-worker-container",
+        "worker",
+        {
+          client,
+          model: stubModel,
+          timeoutMs: 5000,
+          workerContainerCapabilityRoot: join(dir, "caps"),
+          resolveExistingContainerBinding: async () => ({
+            runtime: "/tmp/model-selected-runtime",
+            containerId: "b".repeat(64),
+            env: { PATH: "/usr/bin:/bin" },
+          }),
+          workerExecution: {
+            kind: "existing_container",
+            container: "dev-box",
+            workspaceAccess: "writable",
+            containerCwd: "auto",
+            networkAccess: "inherit",
+          },
+        },
+      ),
+      /invalid worker container capability/,
+    )
+
+    assert.equal(callNames(calls, "create").length, 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("active container execution keeps writer quarantined after session cleanup", async () => {
   resetBridgeStateForTests()
 
@@ -1516,6 +1625,11 @@ test("active container execution keeps writer quarantined after session cleanup"
           model: stubModel,
           timeoutMs: 5000,
           workerContainerCapabilityRoot: join(dir, "caps"),
+          resolveExistingContainerBinding: async () => ({
+            runtime: "/usr/bin/podman",
+            containerId: "a".repeat(64),
+            env: { PATH: "/usr/bin:/bin" },
+          }),
           workerExecution: {
             kind: "existing_container",
             container: "dev-box",
@@ -1575,6 +1689,11 @@ test("late reconciliation clears container quarantine only after activity disapp
         model: stubModel,
         timeoutMs: 5000,
         workerContainerCapabilityRoot: join(dir, "caps"),
+        resolveExistingContainerBinding: async () => ({
+          runtime: "/usr/bin/podman",
+          containerId: "a".repeat(64),
+          env: { PATH: "/usr/bin:/bin" },
+        }),
         workerExecution: {
           kind: "existing_container",
           container: "dev-box",
