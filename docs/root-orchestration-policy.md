@@ -69,7 +69,7 @@ Delegate to Worker as soon as any of these applies:
 - a new file is required;
 - a new helper/function/control-flow block is required;
 - a diagnostic/test/probe script is more than a trivial command;
-- the direct correction fails focused verification once;
+- the same direct correction fails verification once;
 - investigation plus implementation is required;
 - multiple related production edits are needed.
 
