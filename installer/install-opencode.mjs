@@ -323,6 +323,38 @@ const files = [
   },
 
   {
+    role: "worker",
+
+    source:
+      resolve(
+        payload,
+        "opencode/agents/opencode-orchestrator-worker-container.md",
+      ),
+
+    destination:
+      resolve(
+        opencodeConfig,
+        "agents/opencode-orchestrator-worker-container.md",
+      ),
+  },
+
+  {
+    role: "worker",
+
+    source:
+      resolve(
+        payload,
+        "opencode/agents/opencode-orchestrator-worker-container-readonly.md",
+      ),
+
+    destination:
+      resolve(
+        opencodeConfig,
+        "agents/opencode-orchestrator-worker-container-readonly.md",
+      ),
+  },
+
+  {
     role: "runner",
 
     source:
