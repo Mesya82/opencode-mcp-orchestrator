@@ -1769,10 +1769,21 @@ export function validateLocalContainerHost(
     )
   }
 
-  const normalized =
-    resolve(parsed.pathname)
+  if (!value.startsWith("unix:///")) {
+    throw new Error(
+      "CONTAINER_HOST must be a local unix:///absolute/path endpoint",
+    )
+  }
 
-  if (normalized !== parsed.pathname) {
+  const rawPath =
+    value.slice("unix://".length)
+  const normalized =
+    resolve(rawPath)
+
+  if (
+    rawPath !== parsed.pathname ||
+    normalized !== rawPath
+  ) {
     throw new Error(
       "CONTAINER_HOST must use a canonical absolute Unix-socket path",
     )
