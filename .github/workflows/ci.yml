@@ -33,9 +33,17 @@ jobs:
       - name: Typecheck sandbox plugin
         run: npm run typecheck
 
+      - name: Install rootless Podman
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y podman
+
       - name: Build and run focused tests
         env:
           RUN_CONTAINER_LIFECYCLE_INTEGRATION: "1"
+          RUN_ROOTLESS_PODMAN_INTEGRATION: "1"
         run: npm test
 
       - name: Syntax checks
