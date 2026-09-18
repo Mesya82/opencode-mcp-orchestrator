@@ -41,6 +41,7 @@ import sandboxPlugin, {
   readWorkerContainerCapability,
   runCancellableLoggedProcess,
   resolveContainerRunWorkdir,
+  resolveSandboxLogSpawnResult,
   resolveExistingContainerRuntime,
   validateExistingContainerInspect,
   omitUnsupportedMuseFinalToolChoice,
@@ -719,6 +720,54 @@ test("async logged process truncates persisted output without changing successfu
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test("streamed log write failure is contained and terminates the child", async () => {
+  const dir = mkdtempSync(
+    join(tmpdir(), "container-run-log-write-failure-"),
+  )
+
+  try {
+    const result = await runCancellableLoggedProcess(
+      process.execPath,
+      [
+        "-e",
+        'process.stdout.write("trigger"); setInterval(() => {}, 1000)',
+      ],
+      {
+        logPath: join(dir, "combined.log"),
+        logLimitBytes: 4096,
+        timeoutMs: 5000,
+        writeFn: () => {
+          const error = new Error("disk full")
+          error.code = "ENOSPC"
+          throw error
+        },
+      },
+    )
+
+    assert.ok(result.logError)
+    assert.match(result.logError.message, /disk full/)
+    assert.equal(result.timedOut, false)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("sandbox_log reports ENOBUFS and signal as truncated failure", () => {
+  const summary =
+    resolveSandboxLogSpawnResult({
+      status: null,
+      signal: "SIGTERM",
+      error: { code: "ENOBUFS" },
+      stdout: "partial output",
+    })
+
+  assert.equal(summary.exitCode, 1)
+  assert.equal(summary.timedOut, false)
+  assert.equal(summary.failed, true)
+  assert.equal(summary.truncated, true)
+  assert.equal(summary.output, "partial output")
 })
 
 test("synchronous spawn options carry finite timeouts", () => {
