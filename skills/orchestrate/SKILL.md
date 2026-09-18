@@ -182,6 +182,19 @@ Require the worker to report:
 
 The worker may use its isolated verification shell.
 
+When implementation requires an iterative edit/build/test/fix loop in a known
+already-running development container, prefer one Worker delegation with
+`execution.kind: "existing_container"` over root-managed `podman exec` or
+`docker exec` calls. The parent must select the exact container. Do not invent
+or require named execution profiles. Existing-container networking is
+`"inherit"`, meaning the selected container keeps its own network
+configuration and pre-existing capabilities. Use this only for a container the
+parent considers appropriate for the task.
+
+Keep the implementation and its focused verification in that Worker session;
+let the Worker use `container_run` and `sandbox_log` for the repair loop.
+Sol still owns architecture, integration, Git operations, and final acceptance.
+
 Do not ask it to perform Git-mutating operations.
 
 Sol retains ownership of architecture, integration, Git operations, and final acceptance.
