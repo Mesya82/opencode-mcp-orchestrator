@@ -86,36 +86,83 @@ test("deterministic infrastructure failures are remembered by effective executio
 })
 
 test("direct root production edits have a mechanical tiny-fix boundary", () => {
-  const required = [
-    "Sol may directly perform a tiny integration correction only when all of these are true",
-    "the exact edit location is already known",
-    "the correction is confined to one existing file",
-    "no new helper, function, or control-flow block is required",
-    "no new file is required",
-    "no non-trivial diagnostic, test, or probe script is required",
-    "no investigation is required to determine the implementation",
-    "one focused verification should be enough to settle the correction",
-    "the same direct correction fails verification once",
-    "investigation plus implementation is required",
-    "multiple related production edits are needed",
+  const allowClauses = [
+    {
+      skill: "the exact edit location is already known",
+      policy: "the exact edit location is already known",
+    },
+    {
+      skill: "the correction is confined to one existing file",
+      policy: "the correction is confined to one existing file",
+    },
+    {
+      skill: "no new helper, function, or control-flow block is required",
+      policy: "no new helper/function/control-flow block is required",
+    },
+    {
+      skill: "no new file is required",
+      policy: "no new file is required",
+    },
+    {
+      skill: "no non-trivial diagnostic, test, or probe script is required",
+      policy: "no non-trivial diagnostic/test/probe script is required",
+    },
+    {
+      skill: "no investigation is required to determine the implementation",
+      policy: "no investigation is required to determine the implementation",
+    },
+    {
+      skill: "one focused verification should be enough to settle the correction",
+      policy: "one focused verification should be enough to settle the correction",
+    },
   ]
 
-  assertContainsAll(skill, required, "orchestration skill")
+  const escalationClauses = [
+    {
+      skill: "a new file is required",
+      policy: "a new file is required",
+    },
+    {
+      skill: "a new helper, function, or control-flow block is required",
+      policy: "a new helper/function/control-flow block is required",
+    },
+    {
+      skill: "a diagnostic, test, or probe script is more than a trivial command",
+      policy: "a diagnostic/test/probe script is more than a trivial command",
+    },
+    {
+      skill: "the same direct correction fails verification once",
+      policy: "the direct correction fails focused verification once",
+    },
+    {
+      skill: "investigation plus implementation is required",
+      policy: "investigation plus implementation is required",
+    },
+    {
+      skill: "multiple related production edits are needed",
+      policy: "multiple related production edits are needed",
+    },
+  ]
+
+  assertContainsAll(
+    skill,
+    [
+      "Sol may directly perform a tiny integration correction only when all of these are true",
+      ...allowClauses.map(({ skill }) => skill),
+      "Delegate the implementation to Worker as soon as any of these applies",
+      ...escalationClauses.map(({ skill }) => skill),
+    ],
+    "orchestration skill",
+  )
 
   assertContainsAll(
     policyDoc,
     [
       "## Mechanical tiny-direct-fix boundary",
-      "the exact edit location is already known",
-      "the correction is confined to one existing file",
-      "no new helper/function/control-flow block is required",
-      "no new file is required",
-      "no non-trivial diagnostic/test/probe script is required",
-      "no investigation is required to determine the implementation",
-      "one focused verification should be enough to settle the correction",
-      "the direct correction fails focused verification once",
-      "investigation plus implementation is required",
-      "multiple related production edits are needed",
+      "A root-owned production edit is allowed only for a tiny integration correction where all of these are true",
+      ...allowClauses.map(({ policy }) => policy),
+      "Delegate to Worker as soon as any of these applies",
+      ...escalationClauses.map(({ policy }) => policy),
     ],
     "root orchestration policy doc",
   )
