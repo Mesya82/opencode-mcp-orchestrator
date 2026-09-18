@@ -2109,7 +2109,7 @@ export function createServer() {
               z.literal("auto"),
               z.string().min(1),
             ]).default("auto").describe(
-              'Container working directory. "auto" uses the host cwd when that path exists in the container, otherwise the container default.'
+              'Container working directory. "auto" derives the container path from the inspected mount table; if the host worktree cannot be mapped, an explicit absolute container_cwd is required.'
             ),
             network_access: z.literal("inherit").default("inherit").describe(
               "Existing containers retain their own network configuration"
