@@ -1624,8 +1624,8 @@ function validateWorkerContainerCapability(
 
   if (
     typeof container !== "string" ||
-    container.trim() === "" ||
-    /[\x00-\x1f\x7f]/.test(container) ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(container) ||
+    container.length > 256 ||
     (
       workspaceAccess !== "read_only" &&
       workspaceAccess !== "writable"
@@ -1662,6 +1662,37 @@ export function readWorkerContainerCapability(
   const read =
     options?.readFileSync ?? readFileSync
 
+  if (!options?.readFileSync) {
+    let rootInfo
+
+    try {
+      rootInfo = lstatSync(root)
+    } catch {
+      throw new Error(
+        "worker container capability root is unavailable",
+      )
+    }
+
+    const currentUid =
+      typeof process.getuid === "function"
+        ? process.getuid()
+        : undefined
+
+    if (
+      rootInfo.isSymbolicLink() ||
+      !rootInfo.isDirectory() ||
+      (
+        currentUid !== undefined &&
+        typeof rootInfo.uid === "number" &&
+        rootInfo.uid !== currentUid
+      )
+    ) {
+      throw new Error(
+        "worker container capability root is unsafe",
+      )
+    }
+  }
+
   let raw: string
 
   try {
@@ -1690,7 +1721,10 @@ export function validateExistingContainerInspect(
     throw new Error("invalid existing container inspection result")
   }
 
-  if (info.State && isRecord(info.State) && info.State.Running !== true) {
+  if (
+    !isRecord(info.State) ||
+    info.State.Running !== true
+  ) {
     throw new Error("selected existing container is not running")
   }
 
