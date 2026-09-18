@@ -1859,7 +1859,7 @@ export function resolveExistingContainerRuntime(
     )
   }
 
-  return matches[0]
+  return matches[0]!
 }
 
 export function buildContainerExecArgs(
