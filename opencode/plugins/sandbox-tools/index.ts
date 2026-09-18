@@ -2959,15 +2959,14 @@ export function resolveSandboxLogSpawnResult(
   const failed =
     result.error !== null &&
     result.error !== undefined ||
-    signaled
+    signaled ||
+    !Number.isInteger(result.status)
   const exitCode =
     Number.isInteger(result.status)
       ? result.status as number
       : timedOut
         ? 124
-        : failed
-          ? 1
-          : 0
+        : 1
   const output =
     typeof result.stdout === "string"
       ? result.stdout
