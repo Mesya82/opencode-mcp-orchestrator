@@ -1423,7 +1423,12 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       }
 
       await new Promise((resolveWait) => {
-        setTimeout(resolveWait, 100)
+        const waitTimer =
+          setTimeout(resolveWait, 100)
+
+        if (typeof waitTimer.unref === "function") {
+          waitTimer.unref()
+        }
       })
     }
 
