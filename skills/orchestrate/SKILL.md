@@ -182,6 +182,34 @@ Require the worker to report:
 
 The worker may use its isolated verification shell.
 
+When implementation requires an iterative edit/build/test/fix loop in a known
+already-running development container, prefer one Worker delegation with
+`execution.kind: "existing_container"` over root-managed `podman exec` or
+`docker exec` calls. The parent must select the exact container. Do not invent
+or require named execution profiles. Existing-container networking is
+`"inherit"`, meaning the selected container keeps its own network
+configuration and pre-existing capabilities. Use this only for a container the
+parent considers appropriate for the task.
+
+The bridge resolves the selected name once before session creation and pins
+the container ID, runtime path, and validated runtime environment. Treat the
+pre-existing container as parent-trusted: admission does not remove mounts,
+devices, credentials, services, networking, or other capabilities it already
+has. The container must support Python 3 and Linux subreapers; these are probed
+automatically rather than selected through a named profile.
+
+Keep the implementation and its focused verification in that Worker session;
+let the Worker use `container_run` and `sandbox_log` for the repair loop.
+Each `container_run` invocation owns and reaps ordinary descendant processes
+before returning, so do not design the loop around a daemon or service started
+by `container_run` surviving into the next call. Persistent infrastructure
+must already be running in the parent-selected container. If cleanup cannot be
+confirmed, treat the fail-closed activity marker/quarantine as an infrastructure
+failure rather than bypassing it. Same-session calls serialize. A retained
+marker is not recovered by a later call; require explicit operator/container
+recovery rather than cross-run cleanup or marker deletion.
+Sol still owns architecture, integration, Git operations, and final acceptance.
+
 Do not ask it to perform Git-mutating operations.
 
 Sol retains ownership of architecture, integration, Git operations, and final acceptance.

@@ -5,6 +5,7 @@ import {
   existsSync,
   openSync,
   readFileSync,
+  rmSync,
 } from "node:fs"
 
 import {
@@ -198,6 +199,23 @@ function defaultConfigPath() {
   )
 }
 
+function serviceRestartRequiredPath() {
+  const home = process.env.HOME
+
+  if (!home) {
+    throw new Error("HOME is not set")
+  }
+
+  const configHome =
+    process.env.XDG_CONFIG_HOME ||
+    resolve(home, ".config")
+
+  return resolve(
+    configHome,
+    "opencode-mcp-orchestrator/opencode-service-restart-required",
+  )
+}
+
 function loadConfig(path) {
   if (!existsSync(path)) {
     throw new Error(
@@ -312,6 +330,14 @@ const openCodeBinary =
       : commandExists("opencode2")
         ? "opencode2"
         : null
+  )
+
+const openCodeServiceBinary =
+  process.env.OPENCODE_BIN ||
+  (
+    commandExists("opencode2")
+      ? "opencode2"
+      : openCodeBinary
   )
 
 if (openCodeBinary) {
@@ -541,6 +567,38 @@ if (integrations.has("claude")) {
       resolve(args.payload),
     ],
   )
+}
+
+const restartRequired =
+  serviceRestartRequiredPath()
+
+if (existsSync(restartRequired)) {
+  console.log()
+  console.log(
+    "Activating the updated OpenCode plugin generation...",
+  )
+
+  const restart = spawnSync(
+    openCodeServiceBinary,
+    ["service", "restart"],
+    {
+      env: process.env,
+      stdio: "inherit",
+    },
+  )
+
+  if (restart.error) {
+    throw restart.error
+  }
+
+  if (restart.status !== 0 || restart.signal !== null) {
+    throw new Error(
+      "OpenCode service restart failed; OPENCODE_RESTART_REQUIRED",
+    )
+  }
+
+  rmSync(restartRequired)
+  console.log("OPENCODE_SERVICE_RESTARTED")
 }
 
 console.log()

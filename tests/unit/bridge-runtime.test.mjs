@@ -33,6 +33,7 @@ import {
   resolveBridgeTimeoutMs,
   resolveCanonicalCwd,
   resolveRunnerSelection,
+  resolveWorkerExecution,
   resolveServerVersion,
   resolveSessionWaitRefreshMs,
   runAgent as runAgentWithConfiguredBudget,
@@ -1436,6 +1437,323 @@ test("configured caller-budget preflight preserves fail-closed config loading", 
   }
 })
 
+test("late container capability creation is removed after timeout cleanup", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-capability-race-", async (dir) => {
+    let releaseWrite
+    const writeGate = new Promise((resolve) => {
+      releaseWrite = resolve
+    })
+    let capabilityExists = false
+    const removalStates = []
+    const { client } = makeFakeClient()
+
+    const operation = runAgent(
+      dir,
+      "container worker task",
+      "opencode-orchestrator-worker-container",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 30,
+        workerContainerCapabilityRoot: join(dir, "caps"),
+        resolveExistingContainerBinding: async () => ({
+          runtime: "/usr/bin/podman",
+          containerId: "a".repeat(64),
+          env: { PATH: "/usr/bin:/bin" },
+        }),
+        workerExecution: {
+          kind: "existing_container",
+          container: "dev-box",
+          workspaceAccess: "writable",
+          containerCwd: "auto",
+          networkAccess: "inherit",
+        },
+        writeFile: async () => {
+          await writeGate
+          capabilityExists = true
+        },
+        rm: async () => {
+          removalStates.push(capabilityExists)
+          capabilityExists = false
+        },
+      },
+    )
+
+    await assert.rejects(
+      () => operation,
+      /timed out/,
+    )
+
+    assert.ok(
+      removalStates.some((state) => state === false),
+      "timeout cleanup should attempt removal before the blocked write completes",
+    )
+
+    releaseWrite()
+
+    await waitFor(
+      () => removalStates.some((state) => state === true),
+    )
+
+    assert.equal(capabilityExists, false)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("existing-container admission pins a validated capability before session creation", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-binding-", async (dir) => {
+    const { calls, client } = makeFakeClient()
+    let writtenCapability
+    let resolvedNames = []
+
+    const result = await runAgent(
+      dir,
+      "container worker task",
+      "opencode-orchestrator-worker-container",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 5000,
+        workerContainerCapabilityRoot: join(dir, "caps"),
+        resolveExistingContainerBinding: async (name) => {
+          resolvedNames.push(name)
+          return {
+            runtime: "/usr/bin/podman",
+            containerId: "b".repeat(64),
+            env: {
+              PATH: "/usr/bin:/bin",
+              CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
+            },
+          }
+        },
+        writeFile: async (_path, data) => {
+          writtenCapability = JSON.parse(String(data))
+        },
+        workerExecution: {
+          kind: "existing_container",
+          container: "dev-box",
+          workspaceAccess: "writable",
+          containerCwd: "auto",
+          networkAccess: "inherit",
+        },
+      },
+    )
+
+    assert.equal(result, "hello")
+    assert.deepEqual(resolvedNames, ["dev-box"])
+    assert.equal(callNames(calls, "create").length, 1)
+    assert.deepEqual(writtenCapability, {
+      version: 2,
+      container: "dev-box",
+      containerId: "b".repeat(64),
+      runtime: "/usr/bin/podman",
+      runtimeEnv: {
+        PATH: "/usr/bin:/bin",
+        CONTAINER_HOST: "unix:///run/user/1000/podman/podman.sock",
+      },
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      hostCwd: dir,
+    })
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("invalid immutable binding fails before Worker session creation", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-binding-invalid-", async (dir) => {
+    const { calls, client } = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "container worker task",
+        "opencode-orchestrator-worker-container",
+        "worker",
+        {
+          client,
+          model: stubModel,
+          timeoutMs: 5000,
+          workerContainerCapabilityRoot: join(dir, "caps"),
+          resolveExistingContainerBinding: async () => ({
+            runtime: "/tmp/model-selected-runtime",
+            containerId: "b".repeat(64),
+            env: { PATH: "/usr/bin:/bin" },
+          }),
+          workerExecution: {
+            kind: "existing_container",
+            container: "dev-box",
+            workspaceAccess: "writable",
+            containerCwd: "auto",
+            networkAccess: "inherit",
+          },
+        },
+      ),
+      /invalid worker container capability/,
+    )
+
+    assert.equal(callNames(calls, "create").length, 0)
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("active container execution keeps writer quarantined after session cleanup", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-active-", async (dir) => {
+    const { client } = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "container worker task",
+        "opencode-orchestrator-worker-container",
+        "worker",
+        {
+          client,
+          model: stubModel,
+          timeoutMs: 5000,
+          workerContainerCapabilityRoot: join(dir, "caps"),
+          resolveExistingContainerBinding: async () => ({
+            runtime: "/usr/bin/podman",
+            containerId: "a".repeat(64),
+            env: { PATH: "/usr/bin:/bin" },
+          }),
+          workerExecution: {
+            kind: "existing_container",
+            container: "dev-box",
+            workspaceAccess: "writable",
+            containerCwd: "auto",
+            networkAccess: "inherit",
+          },
+          workerContainerActivityLstat: async () => ({
+            isFile: () => true,
+          }),
+        },
+      ),
+      /quarantined/,
+    )
+
+    const blocked = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "second writer",
+        "opencode-orchestrator-worker",
+        "worker",
+        {
+          client: blocked.client,
+          model: stubModel,
+          timeoutMs: 5000,
+        },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(
+      callNames(blocked.calls, "create").length,
+      0,
+    )
+  })
+
+  resetBridgeStateForTests()
+})
+
+test("late reconciliation clears container quarantine only after activity disappears", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-activity-release-", async (dir) => {
+    let active = true
+    let activityChecks = 0
+    const { client } = makeFakeClient()
+
+    const result = await runAgent(
+      dir,
+      "container worker task",
+      "opencode-orchestrator-worker-container",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 5000,
+        workerContainerCapabilityRoot: join(dir, "caps"),
+        resolveExistingContainerBinding: async () => ({
+          runtime: "/usr/bin/podman",
+          containerId: "a".repeat(64),
+          env: { PATH: "/usr/bin:/bin" },
+        }),
+        workerExecution: {
+          kind: "existing_container",
+          container: "dev-box",
+          workspaceAccess: "writable",
+          containerCwd: "auto",
+          networkAccess: "inherit",
+        },
+        workerContainerActivityLstat: async () => {
+          activityChecks += 1
+
+          if (active) {
+            return {
+              isFile: () => true,
+            }
+          }
+
+          const error = new Error("missing")
+          error.code = "ENOENT"
+          throw error
+        },
+      },
+    ).catch((error) => error)
+
+    assert.match(
+      result.message,
+      /quarantined/,
+    )
+
+    active = false
+
+    await waitFor(async () => {
+      const recovered = makeFakeClient()
+
+      try {
+        assert.equal(
+          await runAgent(
+            dir,
+            "recovered writer",
+            "opencode-orchestrator-worker",
+            "worker",
+            {
+              client: recovered.client,
+              model: stubModel,
+              timeoutMs: 5000,
+            },
+          ),
+          "hello",
+        )
+        return true
+      } catch {
+        return false
+      }
+    })
+
+    assert.ok(activityChecks >= 2)
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("writer quarantine frees only after confirmed removal", async () => {
   resetBridgeStateForTests()
 
@@ -1774,6 +2092,93 @@ test("worker and writable runner share quarantine while read-only paths stay fre
   })
 
   resetBridgeStateForTests()
+})
+
+test("worker execution defaults to sandbox and validates existing-container grants", () => {
+  assert.deepEqual(
+    resolveWorkerExecution(undefined),
+    {
+      kind: "sandbox",
+      agent: "opencode-orchestrator-worker",
+    },
+  )
+
+  assert.deepEqual(
+    resolveWorkerExecution({
+      kind: "existing_container",
+      container: "dev-box",
+    }),
+    {
+      kind: "existing_container",
+      container: "dev-box",
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      agent: "opencode-orchestrator-worker-container",
+    },
+  )
+
+  assert.equal(
+    resolveWorkerExecution({
+      kind: "existing_container",
+      container: "dev-box",
+      workspace_access: "read_only",
+      container_cwd: "/workspace",
+      network_access: "inherit",
+    }).agent,
+    "opencode-orchestrator-worker-container-readonly",
+  )
+
+  assert.throws(
+    () => resolveWorkerExecution({
+      kind: "existing_container",
+      container: "",
+    }),
+    /invalid worker existing_container container/,
+  )
+  assert.throws(
+    () => resolveWorkerExecution({
+      kind: "existing_container",
+      container: "--remote",
+    }),
+    /invalid worker existing_container container/,
+  )
+  assert.throws(
+    () => resolveWorkerExecution({
+      kind: "existing_container",
+      container: "dev-box",
+      network_access: "host",
+    }),
+    /only "inherit"/,
+  )
+})
+
+test("worker handler binds existing-container execution without exposing container in task", async () => {
+  let captured
+  const handlers = createToolHandlers(async (...args) => {
+    captured = args
+    return "done"
+  })
+
+  const result = await handlers.worker({
+    cwd: "/tmp/work",
+    task: "implement it",
+    execution: {
+      kind: "existing_container",
+      container: "dev-box",
+    },
+  })
+
+  assert.deepEqual(result, {
+    content: [{ type: "text", text: "done" }],
+  })
+  assert.equal(captured[2], "opencode-orchestrator-worker-container")
+  assert.equal(captured[3], "worker")
+  assert.equal(captured[4].workerExecution.container, "dev-box")
+  assert.equal(captured[4].workerExecution.workspaceAccess, "writable")
+  assert.match(captured[1], /container_run/)
+  assert.match(captured[1], /Network access: inherit|network access: inherit/i)
+  assert.doesNotMatch(captured[1], /dev-box/)
 })
 
 test("tool handlers preserve successful response shape and error shape", async () => {

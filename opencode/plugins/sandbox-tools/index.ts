@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin"
+import { randomUUID } from "node:crypto"
 import {
   chmodSync,
   closeSync,
@@ -10,6 +11,8 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  writeFileSync,
+  writeSync,
   realpathSync,
   rmSync,
   statSync,
@@ -23,12 +26,33 @@ import {
   resolve,
   sep,
 } from "node:path"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 
 import {
   normalizeSandboxRuntime,
   type SandboxRuntimeConfig,
 } from "../../../config/sandbox-runtime.mjs"
+
+import {
+  WORKER_CONTAINER_CAPABILITY_ROOT,
+  workerContainerActivityPath,
+  workerContainerCapabilityPath,
+} from "../../../config/worker-container-capability.mjs"
+
+import {
+  EXISTING_CONTAINER_RUNTIME_PATHS as SHARED_EXISTING_CONTAINER_RUNTIME_PATHS,
+  WORKER_CONTAINER_CAPABILITY_VERSION as SHARED_CAPABILITY_VERSION,
+  buildContainerExecArgs as sharedBuildContainerExecArgs,
+  containerRuntimeEnv as sharedContainerRuntimeEnv,
+  inspectPinnedExistingContainer as sharedInspectPinnedExistingContainer,
+  resolveSelectedExistingContainer as sharedResolveSelectedExistingContainer,
+  validateContainerId as sharedValidateContainerId,
+  validateExistingContainerInspect as sharedValidateExistingContainerInspect,
+  validateLocalContainerHost as sharedValidateLocalContainerHost,
+  validatePinnedRuntimeEnv as sharedValidatePinnedRuntimeEnv,
+  validatePinnedRuntimePath as sharedValidatePinnedRuntimePath,
+  validateWorkerContainerCapability as sharedValidateWorkerContainerCapability,
+} from "../../../config/existing-container-runtime.mjs"
 
 import {
   hasNetworklessIsolation,
@@ -119,21 +143,18 @@ function isRecord(
  * accepts the default/"auto" choice, so that otherwise safe text-only request
  * fails before the model can return its final report.
  *
- * Omit only that unsupported wire field, and only after proving this is a
- * primary request for one of our Muse agents with no tools. With no advertised
- * tools, the provider's default "auto" mode cannot execute a tool, so the hard
- * OpenCode step boundary remains intact. Any unfamiliar shape is left alone.
+ * Omit only that unsupported wire field for Muse requests with no tools. The
+ * hook metadata has changed between OpenCode releases (notably `kind`,
+ * `agent`, and model metadata on final synthesis), so the model is proven from
+ * the wire body instead. With no advertised tools, the provider's default "auto" mode
+ * cannot execute a tool, so the hard OpenCode step boundary remains intact.
+ * Any unfamiliar request or body shape is left alone.
  */
 export async function omitUnsupportedMuseFinalToolChoice(
   input: MuseFinalHttpRequest,
 ): Promise<boolean> {
   if (
-    input.kind !== "primary" ||
-    typeof input.agent !== "string" ||
-    !input.agent.startsWith(ORCHESTRATOR_AGENT_PREFIX) ||
     input.model?.providerID !== "opencode" ||
-    typeof input.model?.id !== "string" ||
-    !input.model.id.startsWith(MUSE_SPARK_MODEL_PREFIX) ||
     input.request.method !== "POST" ||
     !input.request.headers
       .get("content-type")
@@ -153,6 +174,8 @@ export async function omitUnsupportedMuseFinalToolChoice(
 
   if (
     !isRecord(body) ||
+    typeof body.model !== "string" ||
+    !body.model.startsWith(MUSE_SPARK_MODEL_PREFIX) ||
     body.tool_choice !== "none" ||
     !(
       body.tools === undefined ||
@@ -1541,6 +1564,1874 @@ async function executeSandboxRun(
   }
 }
 
+
+export const EXISTING_CONTAINER_RUNTIME_PATHS =
+  SHARED_EXISTING_CONTAINER_RUNTIME_PATHS
+
+export const WORKER_CONTAINER_CAPABILITY_VERSION =
+  SHARED_CAPABILITY_VERSION
+
+export const CONTAINER_RUN_INPUT_PROPERTY_NAMES = [
+  "argv",
+  "workdir",
+  "timeout_seconds",
+] as const
+
+export interface WorkerContainerCapability {
+  version: 2
+  container: string
+  containerId: string
+  runtime: string
+  runtimeEnv: Record<string, string>
+  workspaceAccess: "read_only" | "writable"
+  containerCwd: "auto" | string
+  networkAccess: "inherit"
+  hostCwd: string
+}
+
+export interface ContainerRunInput {
+  argv: string[]
+  workdir?: string
+  timeout_seconds?: number
+}
+
+export function containerRunInputSchema() {
+  return {
+    type: "object" as const,
+    properties: {
+      argv: {
+        type: "array",
+        items: {
+          type: "string",
+        },
+        minItems: 1,
+        maxItems: 256,
+        description:
+          "Executable and arguments to run in the parent-selected container; no shell interpolation is performed",
+      },
+      workdir: {
+        type: "string",
+        minLength: 1,
+        description:
+          "Optional working directory inside the selected container",
+      },
+      timeout_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: RUNNER_MAX_TIMEOUT_SECONDS,
+        description:
+          "Maximum runtime in seconds",
+      },
+    },
+    required: ["argv"],
+    additionalProperties: false,
+  }
+}
+
+function validateWorkerContainerCapability(
+  value: unknown,
+): WorkerContainerCapability {
+  return sharedValidateWorkerContainerCapability(
+    value,
+  ) as unknown as WorkerContainerCapability
+}
+
+export function validateContainerId(value: unknown): string {
+  return sharedValidateContainerId(value)
+}
+
+export function readWorkerContainerCapability(
+  sessionID: string,
+  options?: {
+    root?: string
+    readFileSync?: typeof readFileSync
+  },
+): WorkerContainerCapability {
+  const root =
+    options?.root ??
+    WORKER_CONTAINER_CAPABILITY_ROOT
+  const path =
+    workerContainerCapabilityPath(sessionID, root)
+  const read =
+    options?.readFileSync ?? readFileSync
+
+  if (!options?.readFileSync) {
+    let rootInfo
+
+    try {
+      rootInfo = lstatSync(root)
+    } catch {
+      throw new Error(
+        "worker container capability root is unavailable",
+      )
+    }
+
+    const currentUid =
+      typeof process.getuid === "function"
+        ? process.getuid()
+        : undefined
+
+    if (
+      rootInfo.isSymbolicLink() ||
+      !rootInfo.isDirectory() ||
+      (
+        currentUid !== undefined &&
+        typeof rootInfo.uid === "number" &&
+        rootInfo.uid !== currentUid
+      )
+    ) {
+      throw new Error(
+        "worker container capability root is unsafe",
+      )
+    }
+  }
+
+  let raw: string
+
+  try {
+    raw = read(path, "utf8") as string
+  } catch {
+    throw new Error(
+      "worker container capability is unavailable for this session",
+    )
+  }
+
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error("invalid worker container capability")
+  }
+
+  return validateWorkerContainerCapability(parsed)
+}
+
+export function validateLocalContainerHost(value: string): string {
+  return sharedValidateLocalContainerHost(value)
+}
+
+export function validatePinnedRuntimePath(value: unknown): string {
+  return sharedValidatePinnedRuntimePath(value)
+}
+
+export function validatePinnedRuntimeEnv(
+  value: unknown,
+): Record<string, string> {
+  return sharedValidatePinnedRuntimeEnv(value)
+}
+
+export function containerRuntimeEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  return sharedContainerRuntimeEnv(source)
+}
+
+export function validateExistingContainerInspect(info: unknown): void {
+  return sharedValidateExistingContainerInspect(info)
+}
+
+export function resolveSelectedExistingContainer(
+  container: string,
+  options?: {
+    existsSync?: typeof existsSync
+    spawnSync?: typeof spawnSync
+    runtimePaths?: readonly string[]
+    env?: NodeJS.ProcessEnv
+  },
+): {
+  runtime: string
+  inspect: Record<string, unknown>
+  env: Record<string, string>
+  containerId: string
+} {
+  return sharedResolveSelectedExistingContainer(container, {
+    existsSync: options?.existsSync ?? existsSync,
+    spawnSync: (options?.spawnSync ?? spawnSync) as unknown as (
+      command: string,
+      args: string[],
+      options: {
+        encoding: "utf8"
+        timeout: number
+        maxBuffer: number
+        env: Record<string, string>
+      },
+    ) => {
+      status?: number | null
+      error?: unknown
+      stdout?: unknown
+      stderr?: unknown
+    },
+    runtimePaths: options?.runtimePaths ?? EXISTING_CONTAINER_RUNTIME_PATHS,
+    env: options?.env ?? process.env,
+  }) as {
+    runtime: string
+    inspect: Record<string, unknown>
+    env: Record<string, string>
+    containerId: string
+  }
+}
+
+export function resolveExistingContainerRuntime(
+  container: string,
+  options?: {
+    existsSync?: typeof existsSync
+    spawnSync?: typeof spawnSync
+    runtimePaths?: readonly string[]
+    env?: NodeJS.ProcessEnv
+  },
+): {
+  runtime: string
+  inspect: Record<string, unknown>
+  env: Record<string, string>
+  containerId: string
+} {
+  return resolveSelectedExistingContainer(container, options)
+}
+
+export function inspectPinnedExistingContainer(
+  binding: {
+    runtime: string
+    containerId: string
+    runtimeEnv: Record<string, string>
+  },
+  options?: {
+    spawnSync?: typeof spawnSync
+  },
+): {
+  inspect: Record<string, unknown>
+  runtime: string
+  containerId: string
+  env: Record<string, string>
+} {
+  return sharedInspectPinnedExistingContainer(binding, {
+    spawnSync: (options?.spawnSync ?? spawnSync) as unknown as (
+      command: string,
+      args: string[],
+      options: {
+        encoding: "utf8"
+        timeout: number
+        maxBuffer: number
+        env: Record<string, string>
+      },
+    ) => {
+      status?: number | null
+      error?: unknown
+      stdout?: unknown
+      stderr?: unknown
+    },
+  }) as {
+    inspect: Record<string, unknown>
+    runtime: string
+    containerId: string
+    env: Record<string, string>
+  }
+}
+
+export function buildContainerExecArgs(
+  container: string,
+  argv: readonly string[],
+  workdir?: string,
+  interactive = false,
+): string[] {
+  return sharedBuildContainerExecArgs(container, argv, workdir, interactive)
+}
+
+function pathIsWithin(
+  base: string,
+  candidate: string,
+): boolean {
+  const rel = relative(
+    resolve(base),
+    resolve(candidate),
+  )
+
+  return (
+    rel === "" ||
+    (
+      rel !== ".." &&
+      !rel.startsWith(".." + sep) &&
+      !isAbsolute(rel)
+    )
+  )
+}
+
+export function resolveContainerRunWorkdir(
+  capability: WorkerContainerCapability,
+  requested: string | undefined,
+  inspect: Record<string, unknown>,
+): string {
+  if (requested !== undefined) {
+    if (
+      requested.trim() === "" ||
+      !isAbsolute(requested)
+    ) {
+      throw new Error(
+        "container_run workdir must be an absolute container path",
+      )
+    }
+
+    return requested
+  }
+
+  if (capability.containerCwd !== "auto") {
+    return capability.containerCwd
+  }
+
+  if (!Array.isArray(inspect.Mounts)) {
+    throw new Error(
+      "cannot auto-map worker cwd: existing container inspection has no valid mount table",
+    )
+  }
+
+  const hostCwd = resolve(capability.hostCwd)
+  const candidates: Array<{
+    source: string
+    destination: string
+    writable: boolean
+  }> = []
+
+  for (const rawMount of inspect.Mounts) {
+    if (
+      !isRecord(rawMount) ||
+      typeof rawMount.Source !== "string" ||
+      typeof rawMount.Destination !== "string" ||
+      typeof rawMount.RW !== "boolean" ||
+      rawMount.Source === "" ||
+      !isAbsolute(rawMount.Source) ||
+      !isAbsolute(rawMount.Destination)
+    ) {
+      continue
+    }
+
+    const source = resolve(rawMount.Source)
+
+    if (!pathIsWithin(source, hostCwd)) {
+      continue
+    }
+
+    candidates.push({
+      source,
+      destination: rawMount.Destination,
+      writable: rawMount.RW,
+    })
+  }
+
+  candidates.sort(
+    (left, right) =>
+      right.source.length - left.source.length,
+  )
+
+  const selected = candidates[0]
+
+  if (!selected) {
+    throw new Error(
+      "cannot auto-map worker cwd into the selected existing container from its inspected mount table; set execution.container_cwd explicitly",
+    )
+  }
+
+  if (
+    capability.workspaceAccess === "writable" &&
+    !selected.writable
+  ) {
+    throw new Error(
+      "cannot auto-map writable worker cwd through a read-only container mount; select an appropriate container or set execution.container_cwd explicitly",
+    )
+  }
+
+  const suffix =
+    relative(selected.source, hostCwd)
+
+  return suffix === ""
+    ? selected.destination
+    : resolve(selected.destination, suffix)
+}
+
+export async function runCancellableLoggedProcess(
+  command: string,
+  argv: readonly string[],
+  options: {
+    logPath: string
+    logLimitBytes: number
+    timeoutMs: number
+    signal?: AbortSignal
+    writeFn?: typeof writeSync
+  },
+): Promise<{
+  exitCode: number
+  timedOut: boolean
+  aborted: boolean
+  elapsedMs: number
+  truncated: boolean
+  spawnError?: Error
+  logError?: Error
+}> {
+  const started = Date.now()
+  const logFd = openSync(
+    options.logPath,
+    "w",
+    0o600,
+  )
+  let written = 0
+  let truncated = false
+  let stderrStarted = false
+  let timedOut = false
+  let aborted = options.signal?.aborted === true
+  let logError: Error | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let child:
+    | ReturnType<typeof spawn>
+    | undefined
+
+  const writeChunk = (chunk: unknown) => {
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (written < options.logLimitBytes) {
+      const keep = buffer.subarray(
+        0,
+        Math.max(
+          0,
+          options.logLimitBytes - written,
+        ),
+      )
+
+      if (keep.length > 0) {
+        try {
+          ;(options.writeFn ?? writeSync)(
+            logFd,
+            keep,
+          )
+          written += keep.length
+        } catch (error) {
+          logError =
+            error instanceof Error
+              ? error
+              : new Error(String(error))
+          killChild()
+          return
+        }
+      }
+
+      if (keep.length !== buffer.length) {
+        truncated = true
+      }
+    } else if (buffer.length > 0) {
+      truncated = true
+    }
+  }
+
+  const writeStderr = (chunk: unknown) => {
+    if (!stderrStarted) {
+      stderrStarted = true
+      writeChunk(Buffer.from("\n[stderr]\n"))
+    }
+
+    writeChunk(chunk)
+  }
+
+  const killChild = () => {
+    try {
+      child?.kill("SIGKILL")
+    } catch {
+      // Already exited.
+    }
+  }
+
+  const onAbort = () => {
+    aborted = true
+    killChild()
+  }
+
+  try {
+    child = spawn(
+      command,
+      [...argv],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          PATH: "/usr/bin:/bin",
+        },
+      },
+    )
+
+    child.stdout?.on("data", writeChunk)
+    child.stderr?.on("data", writeStderr)
+
+    if (options.signal) {
+      options.signal.addEventListener(
+        "abort",
+        onAbort,
+        { once: true },
+      )
+    }
+
+    if (aborted) {
+      killChild()
+    }
+
+    timer = setTimeout(() => {
+      timedOut = true
+      killChild()
+    }, options.timeoutMs)
+
+    const completion =
+      await new Promise<{
+        code: number | null
+        signal: NodeJS.Signals | null
+        error?: Error
+      }>((resolveCompletion) => {
+        let settled = false
+
+        const finish = (
+          value: {
+            code: number | null
+            signal: NodeJS.Signals | null
+            error?: Error
+          },
+        ) => {
+          if (settled) return
+          settled = true
+          resolveCompletion(value)
+        }
+
+        child!.once(
+          "error",
+          (error) => finish({
+            code: null,
+            signal: null,
+            error,
+          }),
+        )
+
+        child!.once(
+          "close",
+          (code, signal) => finish({
+            code,
+            signal,
+          }),
+        )
+      })
+
+    const exitCode =
+      Number.isInteger(completion.code)
+        ? completion.code!
+        : timedOut
+          ? 124
+          : aborted
+            ? 130
+            : 1
+
+    return {
+      exitCode,
+      timedOut,
+      aborted,
+      elapsedMs: Date.now() - started,
+      truncated,
+      ...(completion.error
+        ? { spawnError: completion.error }
+        : {}),
+      ...(logError
+        ? { logError }
+        : {}),
+    }
+  } finally {
+    if (timer) {
+      clearTimeout(timer)
+    }
+
+    options.signal?.removeEventListener(
+      "abort",
+      onAbort,
+    )
+
+    closeSync(logFd)
+  }
+}
+
+export const SUPERVISOR_READY_LINE = "OPENCODE_SUPERVISOR_READY"
+export const SUPERVISOR_GO_PREFIX = "OPENCODE_GO"
+export const SUPERVISOR_STOP_PREFIX = "OPENCODE_STOP"
+export const SUPERVISOR_DONE_PREFIX = "OPENCODE_SUPERVISOR_DONE"
+export const SUPERVISOR_ERROR_PREFIX = "OPENCODE_SUPERVISOR_ERROR"
+export const SUPERVISOR_STOP_GRACE_MS = 7000
+
+export function buildSupervisorToken(): string {
+  return (
+    "opencode-" +
+    randomUUID().replaceAll("-", "")
+  )
+}
+
+export function isSupervisorToken(value: string): boolean {
+  return /^opencode-[a-f0-9]{32}$/.test(value)
+}
+
+export const MANAGED_CONTAINER_SUPERVISOR_SCRIPT = [
+  "import ctypes, os, sys, time, select, signal",
+  "READY = \"OPENCODE_SUPERVISOR_READY\"",
+  "GO = \"OPENCODE_GO\"",
+  "STOP = \"OPENCODE_STOP\"",
+  "DONE = \"OPENCODE_SUPERVISOR_DONE\"",
+  "ERROR = \"OPENCODE_SUPERVISOR_ERROR\"",
+  "def err(line):",
+  "    try:",
+  "        sys.stderr.write(line + \"\\n\")",
+  "        sys.stderr.flush()",
+  "    except Exception:",
+  "        pass",
+  "try:",
+  "    libc = ctypes.CDLL(None, use_errno=True)",
+  "    if libc.prctl(36, 1, 0, 0, 0) != 0:",
+  "        err(ERROR + \" subreaper-unavailable\")",
+  "        sys.exit(126)",
+  "except Exception:",
+  "    err(ERROR + \" subreaper-unavailable\")",
+  "    sys.exit(126)",
+  "if len(sys.argv) < 2:",
+  "    err(ERROR + \" missing-command\")",
+  "    sys.exit(125)",
+  "try:",
+  "    sys.stdout.write(READY + \"\\n\")",
+  "    sys.stdout.flush()",
+  "except Exception:",
+  "    sys.exit(125)",
+  "go = sys.stdin.readline()",
+  "if not go:",
+  "    err(ERROR + \" handshake-eof\")",
+  "    sys.exit(125)",
+  "go = go.strip()",
+  "parts = go.split(\" \", 1)",
+  "import re as _re",
+  "if len(parts) != 2 or parts[0] != GO or not _re.fullmatch(r\"opencode-[a-f0-9]{32}\", parts[1]):",
+  "    err(ERROR + \" handshake-rejected\")",
+  "    sys.exit(125)",
+  "token = parts[1]",
+  "cmd = sys.argv[1:]",
+  "try:",
+  "    root = os.fork()",
+  "except Exception:",
+  "    err(ERROR + \" fork-failed\")",
+  "    sys.exit(125)",
+  "if root == 0:",
+  "    try:",
+  "        os.setsid()",
+  "        devnull = os.open('/dev/null', os.O_RDONLY)",
+  "        os.dup2(devnull, 0)",
+  "        if devnull > 2:",
+  "            os.close(devnull)",
+  "    except Exception:",
+  "        os._exit(125)",
+  "    try:",
+  "        os.execvp(cmd[0], cmd)",
+  "    except Exception:",
+  "        os._exit(127)",
+  "def _children():",
+  "    try:",
+  "        with open(\"/proc/self/task/%d/children\" % os.getpid()) as f:",
+  "            return [int(x) for x in f.read().split() if x]",
+  "    except Exception:",
+  "        return []",
+  "def _kill(pid, sig):",
+  "    try:",
+  "        os.kill(pid, sig)",
+  "    except Exception:",
+  "        pass",
+  "def _kill_tree(sig):",
+  "    for c in _children():",
+  "        _kill(c, sig)",
+  "root_status = None",
+  "stop = False",
+  "stdin_closed = False",
+  "deadline = time.monotonic() + 3600",
+  "while True:",
+  "    try:",
+  "        if not stdin_closed:",
+  "            r, _, _ = select.select([sys.stdin], [], [], 0.1)",
+  "            if r:",
+  "                line = sys.stdin.readline()",
+  "                if not line:",
+  "                    stdin_closed = True",
+  "                else:",
+  "                    line = line.strip()",
+  "                    sp = line.split(\" \", 1)",
+  "                    if len(sp) == 2 and sp[0] == STOP and sp[1] == token:",
+  "                        stop = True",
+  "                        deadline = min(deadline, time.monotonic() + 5)",
+  "                        _kill_tree(signal.SIGTERM)",
+  "        else:",
+  "            time.sleep(0.05)",
+  "    except Exception:",
+  "        pass",
+  "    if time.monotonic() > deadline:",
+  "        if root_status is not None or stop:",
+  "            _kill_tree(signal.SIGKILL)",
+  "            if not _children():",
+  "                break",
+  "            try:",
+  "                while True:",
+  "                    wpid_e, status_e = os.waitpid(-1, os.WNOHANG)",
+  "                    if wpid_e == 0:",
+  "                        break",
+  "                    if wpid_e == root and root_status is None:",
+  "                        root_status = status_e",
+  "            except Exception:",
+  "                pass",
+  "            if not _children():",
+  "                break",
+  "            break",
+  "        _kill_tree(signal.SIGTERM)",
+  "        stop = True",
+  "        deadline = time.monotonic() + 5",
+  "        _kill_tree(signal.SIGTERM)",
+  "    try:",
+  "        wpid, status = os.waitpid(-1, os.WNOHANG)",
+  "    except ChildProcessError:",
+  "        break",
+  "    except OSError:",
+  "        time.sleep(0.05)",
+  "        continue",
+  "    if wpid == 0:",
+  "        if root_status is not None or stop:",
+  "            _kill_tree(signal.SIGKILL)",
+  "            if time.monotonic() > deadline:",
+  "                break",
+  "            if not _children():",
+  "                try:",
+  "                    wpid2, status2 = os.waitpid(-1, os.WNOHANG)",
+  "                    if wpid2 == 0:",
+  "                        if time.monotonic() > deadline and (root_status is not None):",
+  "                            break",
+  "                        time.sleep(0.05)",
+  "                        continue",
+  "                    if wpid2 == root and root_status is None:",
+  "                        root_status = status2",
+  "                    continue",
+  "                except ChildProcessError:",
+  "                    break",
+  "                except OSError:",
+  "                    time.sleep(0.05)",
+  "                    continue",
+  "        if stop:",
+  "            _kill_tree(signal.SIGKILL)",
+  "        time.sleep(0.05)",
+  "        continue",
+  "    if wpid == root and root_status is None:",
+  "        root_status = status",
+  "        _kill_tree(signal.SIGTERM)",
+  "        deadline = time.monotonic() + 5",
+  "        continue",
+  "    if root_status is not None and not _children():",
+  "        try:",
+  "            os.waitpid(-1, os.WNOHANG)",
+  "        except Exception:",
+  "            pass",
+  "        break",
+  "for _ in range(50):",
+  "    kids = _children()",
+  "    if not kids:",
+  "        try:",
+  "            os.waitpid(-1, os.WNOHANG)",
+  "        except Exception:",
+  "            pass",
+  "        break",
+  "    for c in kids:",
+  "        _kill(c, signal.SIGKILL)",
+  "    time.sleep(0.1)",
+  "    try:",
+  "        while True:",
+  "            wpid, status = os.waitpid(-1, os.WNOHANG)",
+  "            if wpid == 0:",
+  "                break",
+  "            if wpid == root and root_status is None:",
+  "                root_status = status",
+  "    except Exception:",
+  "        pass",
+  "if _children():",
+  "    err(ERROR + \" cleanup-incomplete\")",
+  "    sys.exit(1)",
+  "if root_status is None:",
+  "    err(ERROR + \" no-root-status\")",
+  "    sys.exit(1)",
+  "if stop:",
+  "    code = 130",
+  "elif os.WIFEXITED(root_status):",
+  "    code = os.WEXITSTATUS(root_status)",
+  "elif os.WIFSIGNALED(root_status):",
+  "    code = 128 + os.WTERMSIG(root_status)",
+  "else:",
+  "    code = 1",
+  "try:",
+  "    sys.stderr.write(\"%s %s %d\\n\" % (DONE, token, code))",
+  "    sys.stderr.flush()",
+  "except Exception:",
+  "    pass",
+  "sys.exit(code)",
+].join("\n")
+
+type ManagedContainerActivity = {
+  version: 1
+  container: string
+  token: string
+}
+
+function readManagedContainerActivity(
+  activityPath: string,
+): ManagedContainerActivity | null {
+  if (!existsSync(activityPath)) {
+    return null
+  }
+
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(
+      readFileSync(activityPath, "utf8"),
+    )
+  } catch {
+    throw new Error(
+      "invalid existing container activity marker",
+    )
+  }
+
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== 1 ||
+    typeof parsed.container !== "string" ||
+    typeof parsed.token !== "string" ||
+    !/^opencode-[a-f0-9]{32}$/.test(parsed.token)
+  ) {
+    throw new Error(
+      "invalid existing container activity marker",
+    )
+  }
+
+  return parsed as ManagedContainerActivity
+}
+
+const containerRunChains = new Map<string, Promise<unknown>>()
+
+export function __clearContainerRunChainsForTests(): void {
+  containerRunChains.clear()
+}
+
+function withContainerRunSerialization<T>(
+  activityPath: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const prior =
+    containerRunChains.get(activityPath) ??
+    Promise.resolve()
+  const next = prior.then(task, task)
+  const tracked: Promise<unknown> = next.catch(
+    () => undefined,
+  )
+  containerRunChains.set(
+    activityPath,
+    tracked,
+  )
+  void tracked.finally(() => {
+    if (
+      containerRunChains.get(activityPath) ===
+      tracked
+    ) {
+      containerRunChains.delete(activityPath)
+    }
+  })
+  return next
+}
+
+export async function runManagedContainerProcess(
+  runtime: string,
+  container: string,
+  argv: readonly string[],
+  workdir: string,
+  options: {
+    logPath: string
+    activityPath: string
+    logLimitBytes: number
+    timeoutMs: number
+    signal?: AbortSignal
+    writeFn?: typeof writeSync
+    runtimeEnv?: Readonly<Record<string, string>>
+    spawnFn?: typeof spawn
+    stopGraceMs?: number
+  },
+): Promise<{
+  exitCode: number
+  timedOut: boolean
+  aborted: boolean
+  elapsedMs: number
+  truncated: boolean
+  terminationConfirmed: boolean
+  spawnError?: Error
+  logError?: Error
+}> {
+  return withContainerRunSerialization(
+    options.activityPath,
+    () =>
+      runManagedContainerProcessInner(
+        runtime,
+        container,
+        argv,
+        workdir,
+        options,
+      ),
+  )
+}
+
+async function runManagedContainerProcessInner(
+  runtime: string,
+  container: string,
+  argv: readonly string[],
+  workdir: string,
+  options: {
+    logPath: string
+    activityPath: string
+    logLimitBytes: number
+    timeoutMs: number
+    signal?: AbortSignal
+    writeFn?: typeof writeSync
+    runtimeEnv?: Readonly<Record<string, string>>
+    spawnFn?: typeof spawn
+    stopGraceMs?: number
+  },
+): Promise<{
+  exitCode: number
+  timedOut: boolean
+  aborted: boolean
+  elapsedMs: number
+  truncated: boolean
+  terminationConfirmed: boolean
+  spawnError?: Error
+  logError?: Error
+}> {
+  const started = Date.now()
+  const runtimeEnv =
+    options.runtimeEnv ??
+    containerRuntimeEnv()
+  const spawnFn = options.spawnFn ?? spawn
+  const stopGraceMs =
+    options.stopGraceMs ??
+    SUPERVISOR_STOP_GRACE_MS
+
+  if (
+    !Array.isArray(argv) ||
+    argv.length === 0 ||
+    argv.some(
+      (arg) =>
+        typeof arg !== "string" ||
+        arg.includes("\0"),
+    )
+  ) {
+    throw new Error(
+      "container_run argv must contain at least one valid string",
+    )
+  }
+
+  // Fail closed: a pre-existing marker (active or quarantined) refuses.
+  // No recovery, no cross-kill, no deletion by another invocation.
+  if (existsSync(options.activityPath)) {
+    throw new Error(
+      "container_run refused: existing container activity marker is present; writer state remains quarantined",
+    )
+  }
+
+  const token = buildSupervisorToken()
+
+  const logFd = openSync(
+    options.logPath,
+    "w",
+    0o600,
+  )
+
+  try {
+    writeFileSync(
+      options.activityPath,
+      JSON.stringify({
+        version: 1,
+        container,
+        token,
+      }) + "\n",
+      {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      },
+    )
+  } catch (error) {
+    closeSync(logFd)
+    if (
+      (error as NodeJS.ErrnoException)
+        ?.code === "EEXIST"
+    ) {
+      throw new Error(
+        "container_run refused: existing container activity marker is present; writer state remains quarantined",
+      )
+    }
+    throw error
+  }
+
+  let child:
+    | ReturnType<typeof spawn>
+    | undefined
+  let stdoutBuf = Buffer.alloc(0)
+  let stderrBuf = ""
+  let ready = false
+  let readyResolve: (() => void) | undefined
+  let readyReject: ((error: Error) => void) | undefined
+  const readyPromise = new Promise<void>((resolve, reject) => {
+    readyResolve = resolve
+    readyReject = reject
+  })
+  readyPromise.catch(() => undefined)
+  let doneCode: number | undefined
+  let doneResolve: (() => void) | undefined
+  const donePromise = new Promise<void>((resolve) => {
+    doneResolve = resolve
+  })
+  let stderrStarted = false
+  let timedOut = false
+  let aborted = options.signal?.aborted === true
+  let protocolError: Error | undefined
+  let logError: Error | undefined
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let stopSent = false
+  let written = 0
+  let truncated = false
+
+  const killClient = () => {
+    try {
+      child?.kill("SIGKILL")
+    } catch {
+      // Already exited.
+    }
+  }
+
+  async function requestStopThroughSupervisor(): Promise<boolean> {
+    if (doneCode !== undefined) return true
+    if (!ready) {
+      killClient()
+      return false
+    }
+    if (!stopSent) {
+      stopSent = true
+      try {
+        child?.stdin?.write(
+          `${SUPERVISOR_STOP_PREFIX} ${token}\n`,
+        )
+      } catch {
+        killClient()
+        return false
+      }
+    }
+
+    let graceTimer: ReturnType<typeof setTimeout> | undefined
+    const settled = await Promise.race([
+      donePromise.then(
+        () => true as const,
+      ),
+      new Promise(
+        (resolve) => {
+          graceTimer = setTimeout(
+            () => resolve(false as const),
+            stopGraceMs,
+          )
+        },
+      ),
+    ])
+    if (graceTimer) clearTimeout(graceTimer)
+
+    if (!settled) {
+      killClient()
+      return false
+    }
+
+    return true
+  }
+
+  const writeLog = (chunk: unknown) => {
+    if (logError) return
+
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (written >= options.logLimitBytes) {
+      if (buffer.length > 0) truncated = true
+      return
+    }
+
+    const keep =
+      buffer.subarray(
+        0,
+        Math.max(
+          0,
+          options.logLimitBytes - written,
+        ),
+      )
+
+    try {
+      if (keep.length > 0) {
+        ;(options.writeFn ?? writeSync)(
+          logFd,
+          keep,
+        )
+        written += keep.length
+      }
+    } catch (error) {
+      logError =
+        error instanceof Error
+          ? error
+          : new Error(String(error))
+      void requestStopThroughSupervisor()
+      return
+    }
+
+    if (keep.length !== buffer.length) {
+      truncated = true
+    }
+  }
+
+  const writeStderrLine = (line: string) => {
+    const doneMatch = line.match(
+      new RegExp(
+        "^" +
+          SUPERVISOR_DONE_PREFIX +
+          " ([A-Za-z0-9._-]{1,128}) ([0-9]{1,3})$",
+      ),
+    )
+
+    if (doneMatch) {
+      // Only the supervisor knows the fresh control token (never
+      // given to the user command), so a spoofed guess is ignored.
+      if (
+        doneMatch[1] === token &&
+        doneCode === undefined
+      ) {
+        const parsed = Number(doneMatch[2])
+
+        if (
+          Number.isInteger(parsed) &&
+          parsed >= 0 &&
+          parsed <= 255
+        ) {
+          doneCode = parsed
+          doneResolve?.()
+          return
+        }
+      }
+
+      writeLog(Buffer.from(line + "\n"))
+      return
+    }
+
+    if (
+      line.startsWith(
+        SUPERVISOR_ERROR_PREFIX,
+      )
+    ) {
+      if (!protocolError) {
+        protocolError = new Error(
+          "container_run supervisor reported: " +
+            line.slice(0, 200),
+        )
+      }
+      writeLog(Buffer.from(line + "\n"))
+      return
+    }
+
+    writeLog(Buffer.from(line + "\n"))
+  }
+
+  const handleStderrChunk = (
+    chunk: unknown,
+  ) => {
+    if (!stderrStarted) {
+      stderrStarted = true
+      writeLog(
+        Buffer.from("\n[stderr]\n"),
+      )
+    }
+
+    const text =
+      Buffer.isBuffer(chunk)
+        ? chunk.toString("utf8")
+        : String(chunk)
+    stderrBuf += text
+    let index = stderrBuf.indexOf("\n")
+
+    while (index >= 0) {
+      const line = stderrBuf
+        .slice(0, index)
+        .replace(/\r$/, "")
+      stderrBuf = stderrBuf.slice(
+        index + 1,
+      )
+      writeStderrLine(line)
+      index = stderrBuf.indexOf("\n")
+    }
+  }
+
+  const flushStderrRemainder = () => {
+    if (stderrBuf.length > 0) {
+      writeStderrLine(stderrBuf)
+      stderrBuf = ""
+    }
+  }
+
+  const handleStdoutChunk = (
+    chunk: unknown,
+  ) => {
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (ready) {
+      writeLog(buffer)
+      return
+    }
+
+    stdoutBuf = Buffer.concat([
+      stdoutBuf,
+      buffer,
+    ])
+
+    if (stdoutBuf.length > 4096) {
+      protocolError = new Error(
+        "container_run startup handshake exceeded its safety bound",
+      )
+      readyReject?.(protocolError)
+      return
+    }
+
+    const newline =
+      stdoutBuf.indexOf(0x0a)
+
+    if (newline < 0) return
+
+    const line = stdoutBuf
+      .subarray(0, newline)
+      .toString("utf8")
+      .replace(/\r$/, "")
+    const remainder = stdoutBuf.subarray(
+      newline + 1,
+    )
+    stdoutBuf = Buffer.alloc(0)
+
+    if (line !== SUPERVISOR_READY_LINE) {
+      protocolError = new Error(
+        "container_run failed to establish its mandatory supervisor handshake",
+      )
+      readyReject?.(protocolError)
+      return
+    }
+
+    ready = true
+    readyResolve?.()
+
+    if (remainder.length > 0) {
+      writeLog(remainder)
+    }
+  }
+
+  const onAbort = () => {
+    aborted = true
+    void requestStopThroughSupervisor()
+  }
+
+  const removeCreatorMarker = () => {
+    // Only the invocation that created the marker may remove it,
+    // and only after authenticated supervisor completion.
+    let current: ManagedContainerActivity | null = null
+
+    try {
+      current = readManagedContainerActivity(
+        options.activityPath,
+      )
+    } catch {
+      return
+    }
+
+    if (
+      current?.token === token &&
+      current?.container === container
+    ) {
+      rmSync(options.activityPath, {
+        force: true,
+      })
+    }
+  }
+
+  let logClosed = false
+  const closeLog = () => {
+    if (logClosed) return
+    logClosed = true
+    closeSync(logFd)
+  }
+
+  const failClosed = (
+    message: string,
+  ): {
+    exitCode: number
+    timedOut: boolean
+    aborted: boolean
+    elapsedMs: number
+    truncated: boolean
+    terminationConfirmed: boolean
+    spawnError: Error
+    logError?: Error
+  } => {
+    flushStderrRemainder()
+    closeLog()
+
+    const error =
+      protocolError ?? new Error(message)
+
+    return {
+      exitCode: 1,
+      timedOut,
+      aborted,
+      elapsedMs: Date.now() - started,
+      truncated,
+      terminationConfirmed: false,
+      spawnError: error,
+      ...(logError
+        ? { logError }
+        : {}),
+    }
+  }
+
+  try {
+    child = spawnFn(
+      runtime,
+      buildContainerExecArgs(
+        container,
+        [
+          "python3",
+          "-u",
+          "-c",
+          MANAGED_CONTAINER_SUPERVISOR_SCRIPT,
+          ...argv,
+        ],
+        workdir,
+        true,
+      ),
+      {
+        stdio: ["pipe", "pipe", "pipe"],
+        env: runtimeEnv,
+      },
+    )
+
+    child.stdin?.on("error", () => {
+      // Cancellation can close stdin while the runtime client is exiting.
+    })
+    child.stdout?.on(
+      "data",
+      handleStdoutChunk,
+    )
+    child.stderr?.on(
+      "data",
+      handleStderrChunk,
+    )
+
+    if (options.signal) {
+      options.signal.addEventListener(
+        "abort",
+        onAbort,
+        { once: true },
+      )
+    }
+
+    const closePromise = new Promise<{
+      code: number | null
+      signal: NodeJS.Signals | null
+      error?: Error
+    }>((resolveCompletion) => {
+      let settled = false
+
+      const finish = (
+        value: {
+          code: number | null
+          signal: NodeJS.Signals | null
+          error?: Error
+        },
+      ) => {
+        if (settled) return
+        settled = true
+        resolveCompletion(value)
+      }
+
+      child!.once(
+        "error",
+        (error) => finish({
+          code: null,
+          signal: null,
+          error,
+        }),
+      )
+
+      child!.once(
+        "close",
+        (code, signal) => finish({
+          code,
+          signal,
+        }),
+      )
+    })
+
+    if (aborted) {
+      void requestStopThroughSupervisor()
+    }
+
+    timer = setTimeout(() => {
+      timedOut = true
+      void requestStopThroughSupervisor()
+    }, options.timeoutMs)
+
+    // Phase 1: mandatory ready handshake. A runtime exit (even 0)
+    // before ready means the command never ran (rootless-Podman
+    // false-success fix): error and retain the marker.
+    const readyOutcome = await Promise.race([
+      readyPromise.then(
+        () => ({ ok: true as const }),
+        () => ({ ok: false as const }),
+      ),
+      closePromise.then(
+        (close) =>
+          ({
+            ok: false as const,
+            close,
+          }),
+      ),
+    ])
+
+    if (!readyOutcome.ok) {
+      protocolError =
+        protocolError ??
+        new Error(
+          "container_run runtime exited before the mandatory supervisor handshake; command never ran",
+        )
+      killClient()
+      {
+        let lateTimer: ReturnType<typeof setTimeout> | undefined
+        await Promise.race([
+          donePromise.then(() => {
+            if (lateTimer) clearTimeout(lateTimer)
+          }),
+          new Promise((resolve) => {
+            lateTimer = setTimeout(
+              resolve,
+              stopGraceMs,
+            )
+          }),
+        ])
+        if (lateTimer) clearTimeout(lateTimer)
+      }
+      return failClosed(
+        "container_run runtime exited before the mandatory supervisor handshake; command never ran",
+      )
+    }
+
+    // Phase 2: send the fresh control token over the attached
+    // channel. The user command never receives it.
+    try {
+      await new Promise<void>(
+        (resolve, reject) => {
+          const frame = `${SUPERVISOR_GO_PREFIX} ${token}\n`
+          const stream = child?.stdin
+
+          if (!stream) {
+            reject(
+              new Error(
+                "container_run control channel is unavailable",
+              ),
+            )
+            return
+          }
+
+          try {
+            stream.write(
+              frame,
+              (error?: Error | null) => {
+                if (error) reject(error)
+                else resolve()
+              },
+            )
+          } catch (error) {
+            reject(
+              error instanceof Error
+                ? error
+                : new Error(String(error)),
+            )
+          }
+        },
+      )
+    } catch (error) {
+      protocolError =
+        error instanceof Error
+          ? error
+          : new Error(String(error))
+      killClient()
+      await closePromise.catch(
+        () => undefined,
+      )
+      return failClosed(
+        "container_run control channel failed before the user command started",
+      )
+    }
+
+    // Phase 3: run until authenticated completion. Abort, timeout,
+    // and log failure request stop through the supervisor channel
+    // and wait a bounded interval for authenticated completion.
+    while (true) {
+      if (logError && !stopSent) {
+        await requestStopThroughSupervisor()
+      }
+
+      const outcome = await Promise.race([
+        donePromise.then(
+          () => ({ kind: "done" as const }),
+        ),
+        closePromise.then(
+          (close) =>
+            ({
+              kind: "closed" as const,
+              close,
+            }),
+        ),
+      ])
+
+      if (outcome.kind === "closed") {
+        if (doneCode !== undefined) {
+          break
+        }
+
+        // Runtime closed without authenticated completion: allow a
+        // bounded grace for a late frame, then fail closed.
+        let lateTimer: ReturnType<typeof setTimeout> | undefined
+        const late = await Promise.race([
+          donePromise.then(
+            () => true as const,
+          ),
+          new Promise(
+            (resolve) => {
+              lateTimer = setTimeout(
+                () =>
+                  resolve(false as const),
+                stopGraceMs,
+              )
+            },
+          ),
+        ])
+        if (lateTimer) clearTimeout(lateTimer)
+
+        if (
+          late &&
+          doneCode !== undefined
+        ) {
+          break
+        }
+
+        return failClosed(
+          "container_run runtime exited without authenticated supervisor completion",
+        )
+      }
+
+      // Authenticated completion arrived; wait bounded for the
+      // runtime client to detach.
+      let detachTimer: ReturnType<typeof setTimeout> | undefined
+      const closed = await Promise.race([
+        closePromise.then(
+          (close) =>
+            ({
+              shut: true as const,
+              close,
+            }),
+        ),
+        new Promise<{ shut: false }>((resolve) => {
+          detachTimer = setTimeout(
+            () =>
+              resolve({
+                shut: false as const,
+              }),
+            stopGraceMs,
+          )
+        }),
+      ])
+      if (detachTimer) clearTimeout(detachTimer)
+
+      if (closed.shut) {
+        break
+      }
+
+      killClient()
+      await closePromise.catch(
+        () => undefined,
+      )
+      break
+    }
+  } finally {
+    if (timer) clearTimeout(timer)
+
+    options.signal?.removeEventListener(
+      "abort",
+      onAbort,
+    )
+
+    flushStderrRemainder()
+    closeLog()
+  }
+
+  const authenticated =
+    ready && doneCode !== undefined
+  const terminationConfirmed = authenticated
+
+  if (terminationConfirmed) {
+    removeCreatorMarker()
+  }
+
+  const exitCode =
+    doneCode !== undefined
+      ? doneCode
+      : timedOut
+        ? 124
+        : aborted
+          ? 130
+          : 1
+
+  let spawnError: Error | undefined
+
+  if (!authenticated) {
+    spawnError =
+      protocolError ??
+      new Error(
+        "container_run could not authenticate supervisor completion; writer state remains quarantined",
+      )
+  }
+
+  return {
+    exitCode,
+    timedOut,
+    aborted,
+    elapsedMs: Date.now() - started,
+    truncated,
+    terminationConfirmed,
+    ...(spawnError
+      ? { spawnError }
+      : {}),
+    ...(logError
+      ? { logError }
+      : {}),
+  }
+}
+
+async function executeContainerRun(
+  sessionID: string,
+  input: ContainerRunInput,
+  abortSignal?: AbortSignal,
+): Promise<{ content: string }> {
+  if (abortSignal?.aborted) {
+    throw new Error("container_run cancelled")
+  }
+
+  const capability =
+    readWorkerContainerCapability(sessionID)
+  const {
+    inspect,
+    runtime,
+    env: runtimeEnv,
+    containerId,
+  } = inspectPinnedExistingContainer(
+    {
+      runtime: capability.runtime,
+      containerId: capability.containerId,
+      runtimeEnv: capability.runtimeEnv,
+    },
+  )
+  const limits = resolveSandboxLimits()
+
+  pruneRunnerRuns({
+    retentionMs: limits.runnerRetentionMs,
+    maxRuns: limits.runnerRetentionCount,
+  })
+
+  const timeoutSeconds = Math.max(
+    1,
+    Math.min(
+      input.timeout_seconds ??
+        RUNNER_DEFAULT_TIMEOUT_SECONDS,
+      RUNNER_MAX_TIMEOUT_SECONDS,
+    ),
+  )
+
+  const workdir =
+    resolveContainerRunWorkdir(
+      capability,
+      input.workdir,
+      inspect,
+    )
+
+  ensureRunnerRoot()
+
+  const runDir = mkdtempSync(
+    join(RUNNER_ROOT, "run-"),
+  )
+  const runID = basename(runDir)
+  const combinedLog =
+    join(runDir, "combined.log")
+  const activityPath =
+    workerContainerActivityPath(sessionID)
+
+  const beforeStatus =
+    gitStatus(capability.hostCwd)
+
+  const result =
+    await runManagedContainerProcess(
+      runtime,
+      containerId,
+      input.argv,
+      workdir,
+      {
+        logPath: combinedLog,
+        activityPath,
+        logLimitBytes:
+          limits.runnerLogLimitBytes,
+        timeoutMs:
+          timeoutSeconds * 1000,
+        signal: abortSignal,
+        runtimeEnv,
+      },
+    )
+
+  if (result.truncated) {
+    writeFileSync(
+      join(runDir, "truncated"),
+      "1",
+      { mode: 0o600 },
+    )
+  }
+
+  writeFileSync(
+    join(runDir, "exit_code"),
+    String(result.exitCode),
+    { mode: 0o600 },
+  )
+
+  if (!result.terminationConfirmed) {
+    throw new Error(
+      "container_run could not confirm termination of the in-container command; writer state remains quarantined",
+    )
+  }
+
+  if (result.logError) {
+    throw new Error(
+      "container_run log persistence failed; the in-container command was terminated before returning",
+    )
+  }
+
+  const afterStatus =
+    gitStatus(capability.hostCwd)
+  const delta =
+    statusDelta(beforeStatus, afterStatus)
+  const bytes =
+    statSync(combinedLog).size
+  const tail =
+    readTail(combinedLog, 7000)
+
+  return {
+    content: [
+      `run_id=${runID}`,
+      `exit_code=${result.exitCode}`,
+      `timed_out=${result.timedOut}`,
+      `cancelled=${result.aborted}`,
+      `termination_confirmed=${result.terminationConfirmed}`,
+      `elapsed_ms=${result.elapsedMs}`,
+      `log_bytes=${bytes}`,
+      `log_truncated=${result.truncated}`,
+      `workspace_access=${capability.workspaceAccess}`,
+      "network_access=inherit",
+      `container_workdir=${workdir}`,
+      `worktree_status_changed=${delta.length > 0}`,
+      delta.length > 0
+        ? "worktree_status_delta:\n" +
+          truncate(
+            delta.slice(0, 30).join("\n"),
+            6000,
+          )
+        : "worktree_status_delta:",
+      result.spawnError
+        ? "launcher_error:\n" +
+          truncate(
+            result.spawnError.message,
+            5000,
+          )
+        : "launcher_error:",
+      tail
+        ? "log_tail:\n" + tail
+        : "log_tail:",
+      "",
+      "Use sandbox_log with this run_id to search or inspect the persisted log up to the configured safety cap.",
+    ].join("\n"),
+  }
+}
+
+export function resolveSandboxLogSpawnResult(
+  result: {
+    status?: number | null
+    signal?: unknown
+    error?: unknown
+    stdout?: unknown
+  },
+): {
+  exitCode: number
+  timedOut: boolean
+  failed: boolean
+  truncated: boolean
+  output: string
+} {
+  const timedOut =
+    isSpawnTimeout(result)
+  const errorCode =
+    isRecord(result.error) &&
+    typeof result.error.code === "string"
+      ? result.error.code
+      : undefined
+  const truncated =
+    errorCode === "ENOBUFS"
+  const signaled =
+    result.signal !== null &&
+    result.signal !== undefined
+  const failed =
+    result.error !== null &&
+    result.error !== undefined ||
+    signaled ||
+    !Number.isInteger(result.status)
+  const exitCode =
+    Number.isInteger(result.status)
+      ? result.status as number
+      : timedOut
+        ? 124
+        : 1
+  const output =
+    typeof result.stdout === "string"
+      ? result.stdout
+      : ""
+
+  return {
+    exitCode,
+    timedOut,
+    failed,
+    truncated,
+    output,
+  }
+}
+
+
 export default Plugin.define({
   id: "local.sandbox-tools",
 
@@ -1827,10 +3718,50 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "container_run",
+
+        description:
+          "Run argv in the one existing container selected by the parent for this Worker session. " +
+          "The model cannot select a container or access generic Podman/Docker control. Output is persisted outside model context up to the configured runner safety cap for sandbox_log; excess output is drained and marked truncated. " +
+          "Processes started by this invocation run under an in-container Python 3 subreaper supervisor with a mandatory ready/go/completion handshake: the root command runs in a new session, the runtime exec stays attached until the root command has exited and every adopted descendant has been terminated and reaped, and the user command never inherits an ownership token. Do not rely on starting persistent daemons or services with container_run. Pre-existing container services are unaffected. " +
+          "The existing container retains its own mounts, devices, credentials, services, and network configuration.",
+
+        input: containerRunInputSchema(),
+
+        options: {
+          codemode: false,
+        },
+
+        execute: async (input, context) => {
+          const toolContext =
+            context as
+              | {
+                  sessionID?: unknown
+                  abort?: AbortSignal
+                }
+              | undefined
+          const sessionID =
+            toolContext?.sessionID
+
+          if (typeof sessionID !== "string") {
+            throw new Error(
+              "container_run requires an OpenCode session id",
+            )
+          }
+
+          return executeContainerRun(
+            sessionID,
+            input as ContainerRunInput,
+            toolContext?.abort,
+          )
+        },
+      })
+
+      editor.add({
         name: "sandbox_log",
 
         description:
-          "Inspect the persisted output of a previous sandbox_run* execution without loading the whole log into model context. " +
+          "Inspect the persisted output of a previous sandbox_run* or container_run execution without loading the whole log into model context. " +
           "Supports grep, tail, head, and bounded line ranges.",
 
         input: {
@@ -2029,27 +3960,36 @@ export default Plugin.define({
             sandboxLogSpawnOptions(),
           )
 
-          const timedOut =
-            isSpawnTimeout(result)
+          const summary =
+            resolveSandboxLogSpawnResult(result)
 
-          const output =
-            result.stdout ?? ""
+          const boundedOutput =
+            summary.output
+              ? truncate(
+                  summary.output,
+                  logLimits.shellMaxOutputBytes,
+                )
+              : ""
 
           return {
             content: [
               `run_id=${run_id}`,
               `mode=${mode}`,
-              `tool_exit_code=${result.status ?? 0}`,
-              `timed_out=${timedOut}`,
-              timedOut && !output
+              `tool_exit_code=${summary.exitCode}`,
+              `timed_out=${summary.timedOut}`,
+              `tool_failed=${summary.failed}`,
+              `output_truncated=${summary.truncated}`,
+              summary.timedOut && !boundedOutput
                 ? `result:\n[sandbox_log timed out after ${SANDBOX_LOG_TIMEOUT_MS}ms]`
-                : output
-                  ? "result:\n" +
-                    truncate(
-                      output,
-                      logLimits.shellMaxOutputBytes,
-                    )
-                  : "result:",
+                : summary.truncated
+                  ? "result:\n[sandbox_log output truncated by inspection safety cap]\n" +
+                    boundedOutput
+                  : boundedOutput
+                    ? "result:\n" +
+                      boundedOutput
+                    : summary.failed
+                      ? "result:\n[sandbox_log inspection failed]"
+                      : "result:",
             ].join("\n"),
           }
         },

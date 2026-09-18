@@ -107,6 +107,8 @@ test("dist public files use explicit 0644", () => {
     "opencode/plugins/sandbox-tools/index.ts",
     "opencode/agents/opencode-orchestrator-scout.md",
     "opencode/agents/opencode-orchestrator-worker.md",
+    "opencode/agents/opencode-orchestrator-worker-container.md",
+    "opencode/agents/opencode-orchestrator-worker-container-readonly.md",
     "opencode/agents/opencode-orchestrator-runner.md",
     "opencode/agents/opencode-orchestrator-runner-writable.md",
     "opencode/agents/opencode-orchestrator-runner-network.md",

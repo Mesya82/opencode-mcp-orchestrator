@@ -339,6 +339,20 @@ if (config) {
 console.log()
 console.log("OpenCode backend")
 
+const serviceRestartRequiredPath =
+  resolve(
+    appConfig,
+    "opencode-service-restart-required",
+  )
+
+if (existsSync(serviceRestartRequiredPath)) {
+  fail(
+    "OpenCode plugin generation is not activated; rerun full orchestrator setup",
+  )
+} else {
+  ok("OpenCode plugin activation marker clear")
+}
+
 for (const { relative, role } of [
   {
     relative: "agents/opencode-orchestrator-scout.md",

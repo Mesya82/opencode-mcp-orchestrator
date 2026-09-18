@@ -1,7 +1,13 @@
+import { chmod } from "node:fs/promises"
+import { lstat } from "node:fs/promises"
+import { mkdir } from "node:fs/promises"
 import { realpath } from "node:fs/promises"
 import { readFile } from "node:fs/promises"
+import { rm } from "node:fs/promises"
 import { stat } from "node:fs/promises"
-import { readFileSync } from "node:fs"
+import { writeFile } from "node:fs/promises"
+import { existsSync, readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
 import { homedir } from "node:os"
 import { dirname } from "node:path"
 import { isAbsolute } from "node:path"
@@ -32,6 +38,18 @@ import {
   assertRunnerTimeoutFits,
   normalizeConfigTimeoutLimits,
 } from "../config/timeout-limits.mjs"
+
+import {
+  WORKER_CONTAINER_CAPABILITY_ROOT,
+  workerContainerActivityPath,
+  workerContainerCapabilityPath,
+} from "../config/worker-container-capability.mjs"
+
+import {
+  WORKER_CONTAINER_CAPABILITY_VERSION,
+  resolveSelectedExistingContainer,
+  validateWorkerContainerCapability,
+} from "../config/existing-container-runtime.mjs"
 
 export const SERVER_VERSION_FALLBACK = "0.0.0-dev"
 
@@ -1169,6 +1187,160 @@ export async function waitForSessionCompletion(
   }
 }
 
+async function installWorkerContainerCapability(
+  sessionID,
+  directory,
+  execution,
+  binding,
+  overrides = {},
+) {
+  const root =
+    overrides.workerContainerCapabilityRoot ??
+    WORKER_CONTAINER_CAPABILITY_ROOT
+  const mkdirFn = overrides.mkdir ?? mkdir
+  const lstatFn = overrides.lstat ?? lstat
+  const chmodFn = overrides.chmod ?? chmod
+  const writeFileFn = overrides.writeFile ?? writeFile
+
+  await mkdirFn(root, {
+    recursive: true,
+    mode: 0o700,
+  })
+
+  const rootInfo = await lstatFn(root)
+  const currentUid =
+    typeof process.getuid === "function"
+      ? process.getuid()
+      : undefined
+
+  if (
+    rootInfo.isSymbolicLink() ||
+    !rootInfo.isDirectory() ||
+    (
+      currentUid !== undefined &&
+      typeof rootInfo.uid === "number" &&
+      rootInfo.uid !== currentUid
+    )
+  ) {
+    throw new Error(
+      "worker container capability root is unsafe",
+    )
+  }
+
+  await chmodFn(root, 0o700)
+
+  const path = workerContainerCapabilityPath(
+    sessionID,
+    root,
+  )
+
+  if (
+    !binding ||
+    typeof binding.runtime !== "string" ||
+    typeof binding.containerId !== "string" ||
+    binding.env === null ||
+    typeof binding.env !== "object"
+  ) {
+    throw new Error(
+      "selected existing container could not be pinned to an immutable runtime binding",
+    )
+  }
+
+  const capability = validateWorkerContainerCapability({
+    version: WORKER_CONTAINER_CAPABILITY_VERSION,
+    container: execution.container,
+    containerId: binding.containerId,
+    runtime: binding.runtime,
+    runtimeEnv: binding.env,
+    workspaceAccess: execution.workspaceAccess,
+    containerCwd: execution.containerCwd,
+    networkAccess: "inherit",
+    hostCwd: directory,
+  })
+
+  await writeFileFn(
+    path,
+    JSON.stringify(capability) + "\n",
+    {
+      encoding: "utf8",
+      mode: 0o600,
+      flag: "wx",
+    },
+  )
+
+  return path
+}
+
+async function resolveWorkerContainerBinding(
+  execution,
+  directory,
+  overrides = {},
+) {
+  const existsSyncFn =
+    overrides.existingContainerExistsSync ?? existsSync
+  const spawnSyncFn =
+    overrides.existingContainerSpawnSync ?? spawnSync
+  const runtimeEnvSource =
+    overrides.existingContainerEnv ?? overrides.env ?? process.env
+  const resolveBinding =
+    overrides.resolveExistingContainerBinding ??
+    ((name) =>
+      resolveSelectedExistingContainer(name, {
+        existsSync: existsSyncFn,
+        spawnSync: spawnSyncFn,
+        env: runtimeEnvSource,
+      }))
+
+  const binding = await resolveBinding(execution.container)
+
+  if (
+    !binding ||
+    typeof binding.runtime !== "string" ||
+    typeof binding.containerId !== "string" ||
+    binding.env === null ||
+    typeof binding.env !== "object"
+  ) {
+    throw new Error(
+      "selected existing container could not be pinned to an immutable runtime binding",
+    )
+  }
+
+  const capability = validateWorkerContainerCapability({
+    version: WORKER_CONTAINER_CAPABILITY_VERSION,
+    container: execution.container,
+    containerId: binding.containerId,
+    runtime: binding.runtime,
+    runtimeEnv: binding.env,
+    workspaceAccess: execution.workspaceAccess,
+    containerCwd: execution.containerCwd,
+    networkAccess: "inherit",
+    hostCwd: directory,
+  })
+
+  return {
+    runtime: capability.runtime,
+    containerId: capability.containerId,
+    env: capability.runtimeEnv,
+  }
+}
+
+async function removeWorkerContainerCapability(
+  path,
+  overrides = {},
+) {
+  if (!path) return
+
+  const rmFn = overrides.rm ?? rm
+
+  try {
+    await rmFn(path, { force: true })
+  } catch (error) {
+    debug(
+      `failed to remove worker container capability ${path}: ${error?.message ?? error}`
+    )
+  }
+}
+
 export async function runAgent(directoryArg, task, agent, role, overrides = {}) {
   /*
    * Canonicalize and validate before any OpenCode session exists, so
@@ -1296,6 +1468,48 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
   let result
   let operationError
   let quarantineError
+  let workerContainerCapabilityFile
+  let workerContainerActivityFile
+
+  const workerContainerExecutionActive = async () => {
+    if (!workerContainerActivityFile) return false
+
+    const activityLstat =
+      overrides.workerContainerActivityLstat ?? lstat
+
+    try {
+      await activityLstat(workerContainerActivityFile)
+      return true
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return false
+      }
+
+      debug(
+        `failed to inspect worker container activity marker ${workerContainerActivityFile}: ${error?.message ?? error}`
+      )
+      return true
+    }
+  }
+
+  const waitForWorkerContainerInactive = async () => {
+    for (let attempt = 0; attempt < 80; attempt += 1) {
+      if (!await workerContainerExecutionActive()) {
+        return true
+      }
+
+      await new Promise((resolveWait) => {
+        const waitTimer =
+          setTimeout(resolveWait, 100)
+
+        if (typeof waitTimer.unref === "function") {
+          waitTimer.unref()
+        }
+      })
+    }
+
+    return false
+  }
 
   /*
    * Exactly-once session cleanup/preservation. The outer finally runs it
@@ -1305,6 +1519,13 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
    * session. Diagnostic mode interrupts unsuccessful work but preserves the
    * session for postmortem inspection.
    */
+  const cleanupWorkerContainerCapability = async () => {
+    await removeWorkerContainerCapability(
+      workerContainerCapabilityFile,
+      overrides,
+    )
+  }
+
   const cleanupOnce = async () => {
     if (cleanupAttempted) {
       return cleanupResult
@@ -1315,6 +1536,8 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     }
 
     cleanupAttempted = true
+
+    await cleanupWorkerContainerCapability()
 
     cleanupResult = await cleanupSession(
       sessionClient,
@@ -1338,8 +1561,24 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
   const reconcileLateWriter = async () => {
     const result = await cleanupOnce()
 
+    /*
+     * Capability installation may have completed after an earlier timeout or
+     * cancellation cleanup already ran. Removal is intentionally idempotent
+     * and retried after the background work settles so a late-created session
+     * capability cannot be orphaned.
+     */
+    await cleanupWorkerContainerCapability()
+
     if (result?.preserved === true) {
       preserveWriter(directory, sessionID)
+      return
+    }
+
+    if (
+      await workerContainerExecutionActive() &&
+      !await waitForWorkerContainerInactive()
+    ) {
+      quarantineWriter(directory, sessionID)
       return
     }
 
@@ -1358,6 +1597,16 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
   try {
     work = (async () => {
+      const workerContainerBinding =
+        role === "worker" &&
+        overrides.workerExecution?.kind === "existing_container"
+          ? await resolveWorkerContainerBinding(
+              overrides.workerExecution,
+              directory,
+              overrides,
+            )
+          : undefined
+
       const client = sessionClient ?? await getClient(overrides)
 
       sessionClient = client
@@ -1382,6 +1631,39 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       if (!sessionID) {
         throw new Error(
           `OpenCode ${agent} session creation returned no session id`
+        )
+      }
+
+      if (
+        role === "worker" &&
+        overrides.workerExecution?.kind === "existing_container"
+      ) {
+        const capabilityRoot =
+          overrides.workerContainerCapabilityRoot ??
+          WORKER_CONTAINER_CAPABILITY_ROOT
+
+        /*
+         * Record the expected path before awaiting creation. Timeout cleanup
+         * can therefore remove a capability that appeared concurrently, and
+         * late reconciliation retries the same path after installation settles.
+         */
+        workerContainerCapabilityFile =
+          workerContainerCapabilityPath(
+            sessionID,
+            capabilityRoot,
+          )
+        workerContainerActivityFile =
+          workerContainerActivityPath(
+            sessionID,
+            capabilityRoot,
+          )
+
+        await installWorkerContainerCapability(
+          sessionID,
+          directory,
+          overrides.workerExecution,
+          workerContainerBinding,
+          overrides,
         )
       }
 
@@ -1515,8 +1797,14 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     if (takesWriterLock) {
       const confirmed = cleanupResult?.removeConfirmed === true
       const preserved = cleanupResult?.preserved === true
+      const containerExecutionActive =
+        await workerContainerExecutionActive()
 
-      if (confirmed) {
+      if (containerExecutionActive) {
+        quarantineWriter(directory, sessionID)
+        quarantineError =
+          new Error(writerQuarantineMessage(directory))
+      } else if (confirmed) {
         clearWriterState(directory)
       } else if (preserved) {
         preserveWriter(directory, sessionID)
@@ -1673,6 +1961,93 @@ export function resolveRunnerSelection(workspaceAccess = "read_only", networkAcc
   }
 }
 
+export function resolveWorkerExecution(execution) {
+  if (execution === undefined || execution?.kind === "sandbox") {
+    return {
+      kind: "sandbox",
+      agent: "opencode-orchestrator-worker",
+    }
+  }
+
+  if (
+    execution === null ||
+    typeof execution !== "object" ||
+    Array.isArray(execution) ||
+    execution.kind !== "existing_container"
+  ) {
+    throw new Error(
+      'invalid worker execution: expected kind "sandbox" or "existing_container"',
+    )
+  }
+
+  const container =
+    typeof execution.container === "string"
+      ? execution.container.trim()
+      : ""
+
+  if (
+    container === "" ||
+    container.length > 256 ||
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(container)
+  ) {
+    throw new Error(
+      "invalid worker existing_container container",
+    )
+  }
+
+  const workspaceAccess =
+    execution.workspace_access ?? "writable"
+
+  if (
+    workspaceAccess !== "read_only" &&
+    workspaceAccess !== "writable"
+  ) {
+    throw new Error(
+      'invalid worker workspace_access: expected "read_only" or "writable"',
+    )
+  }
+
+  const containerCwd =
+    execution.container_cwd ?? "auto"
+
+  if (
+    containerCwd !== "auto" &&
+    (
+      typeof containerCwd !== "string" ||
+      containerCwd.trim() === "" ||
+      !isAbsolute(containerCwd)
+    )
+  ) {
+    throw new Error(
+      'invalid worker container_cwd: expected "auto" or an absolute container path',
+    )
+  }
+
+  const networkAccess =
+    execution.network_access ?? "inherit"
+
+  if (networkAccess !== "inherit") {
+    throw new Error(
+      'invalid worker network_access: existing containers support only "inherit"',
+    )
+  }
+
+  return {
+    kind: "existing_container",
+    container,
+    workspaceAccess,
+    containerCwd:
+      containerCwd === "auto"
+        ? "auto"
+        : normalize(containerCwd),
+    networkAccess: "inherit",
+    agent:
+      workspaceAccess === "read_only"
+        ? "opencode-orchestrator-worker-container-readonly"
+        : "opencode-orchestrator-worker-container",
+  }
+}
+
 export function createToolHandlers(run = runAgent) {
   return {
     scout: async (args, ctx) => {
@@ -1693,12 +2068,34 @@ export function createToolHandlers(run = runAgent) {
 
     worker: async (args, ctx) => {
       try {
+        const execution =
+          resolveWorkerExecution(args.execution)
+
+        const task =
+          execution.kind === "existing_container"
+            ? [
+                args.task,
+                "",
+                "Execution environment: parent-selected existing container.",
+                `Workspace access intent: ${execution.workspaceAccess}.`,
+                "Container network access: inherit (the container keeps its existing network configuration).",
+                "Use container_run with argv arrays for iterative verification.",
+                "The container identity is fixed outside model-visible tool input and cannot be changed by this session.",
+                "Use sandbox_log to inspect persisted command output instead of rerunning commands merely to see more log lines.",
+              ].join("\n")
+            : args.task
+
         const text = await run(
           args.cwd,
-          args.task,
-          "opencode-orchestrator-worker",
+          task,
+          execution.agent,
           "worker",
-          { signal: mcpRequestSignal(ctx) },
+          {
+            signal: mcpRequestSignal(ctx),
+            ...(execution.kind === "existing_container"
+              ? { workerExecution: execution }
+              : {}),
+          },
         )
 
         return { content: [{ type: "text", text }] }
@@ -1834,9 +2231,9 @@ export function createServer() {
       title: "OpenCode Orchestrator Worker",
       description:
         "Run a bounded repository implementation task in a fresh OpenCode session using the configured OpenCode model. " +
-        "The worker may edit ordinary workspace files and use its isolated sandbox_shell for " +
-        "focused verification. Git metadata is protected and model-controlled shell networking " +
-        "is blocked.",
+        "The worker may edit ordinary workspace files and use its isolated sandbox_shell for focused verification. " +
+        "Optionally, the parent may bind the Worker to one already-running Podman/Docker development container for iterative verification; " +
+        "the Worker receives no generic container-runtime control and cannot change the selected container.",
       inputSchema: z.object({
         cwd: z.string().min(1).describe(
           "Absolute path to the repository or worktree to modify"
@@ -1844,11 +2241,39 @@ export function createServer() {
         task: z.string().min(1).describe(
           "Complete self-contained bounded implementation task including acceptance criteria and verification"
         ),
+        execution: z.discriminatedUnion("kind", [
+          z.object({
+            kind: z.literal("sandbox"),
+          }).strict(),
+          z.object({
+            kind: z.literal("existing_container"),
+            container: z.string().min(1).max(256).describe(
+              "Parent-selected name or ID of an already-running container"
+            ),
+            workspace_access: z.enum(["read_only", "writable"]).default("writable").describe(
+              "Intended project workspace mutation mode inside the selected existing container"
+            ),
+            container_cwd: z.union([
+              z.literal("auto"),
+              z.string().min(1),
+            ]).default("auto").describe(
+              'Container working directory. "auto" derives the container path from the inspected mount table; if the host worktree cannot be mapped, an explicit absolute container_cwd is required.'
+            ),
+            network_access: z.literal("inherit").default("inherit").describe(
+              "Existing containers retain their own network configuration"
+            ),
+          }).strict(),
+        ]).optional().describe(
+          "Optional Worker execution environment; omitted/sandbox preserves the existing isolated sandbox behavior"
+        ),
       }),
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,
-        openWorldHint: false,
+        // Existing-container execution may inherit external network access.
+        // Static MCP annotations cannot vary per call, so advertise the
+        // broader supported capability even though sandbox remains default.
+        openWorldHint: true,
       },
     },
     handlers.worker,

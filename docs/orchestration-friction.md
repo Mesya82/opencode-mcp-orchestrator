@@ -256,11 +256,12 @@ Confirmed fact: worker session `ses_f5ebd0ffdffeyzhQFrnTVyZh12` failed on
 supported for `tool_choice`. It left partial edits; a materially narrower
 retry later succeeded.
 
-Confirmed fact: the repository hook `omitUnsupportedMuseFinalToolChoice` in
-`opencode/plugins/sandbox-tools/index.ts` strips literal `tool_choice:"none"`
+At the time of that incident, the repository hook
+`omitUnsupportedMuseFinalToolChoice` in
+`opencode/plugins/sandbox-tools/index.ts` stripped literal `tool_choice:"none"`
 only for primary `opencode-orchestrator-*` sessions using providerID
 `opencode` and model id prefix `muse-spark-`, with tools absent or `[]`. The
-current installed plugin contains the hook, and the current worker model is
+installed plugin contained the hook, and the worker model was
 `opencode/muse-spark-1.3-contributor-free` (variant low, Extended 48 steps).
 
 Confirmed fact: the installed plugin hash equals the current installed bundle
@@ -270,10 +271,14 @@ hash and contains the hook. The OpenCode service run `e57c2ef2` started
 same long-lived run `e57c2ef2`. `opencode.log` contains zero
 `opencode_orchestrator_muse_final_tool_choice_omitted` events.
 
-Diagnosis: confirmed operational stale-process/load issue — the long-lived
-OpenCode service did not reload the installed compatibility hook. This is not
-current source drift or a model-predicate mismatch. No open design question
-on cause.
+The original diagnosis was a confirmed operational stale-process/load issue:
+the long-lived OpenCode service did not reload the installed compatibility
+hook. A 2026-09-18 recurrence after a confirmed service restart exposed a
+second cause: final-synthesis hook metadata does not keep stable `kind`,
+`agent`, and model-ID fields across OpenCode releases. The hook now proves the
+Muse model from the JSON wire body and the OpenCode provider filter, then
+requires `tool_choice:"none"` with tools absent or empty. It no longer uses
+those unstable metadata fields as predicates.
 
 Why a successful update did not prevent it: `install-opencode.mjs` atomically
 replaces managed plugin files, and `setup.mjs` subsequently runs Doctor, but
@@ -290,18 +295,21 @@ but fail before returning its final report.
 Immediate recovery: restart/reload the OpenCode service after install/update
 so the installed hook is loaded; then retry with a narrowed task if needed.
 
-Required correction: installer/setup must explicitly require activation after
-updating the OpenCode plugin. Because an automatic restart can interrupt active
-sessions and leave writable work quarantined, the safe default is an explicit
-`OPENCODE_RESTART_REQUIRED` result with the supported
-`opencode2 service restart` command; interactive setup may offer that restart
-only after confirmation. Doctor must detect/report stale loaded state rather
-than treating file presence as runtime readiness. Keep the current hook until
-upstream issue #48741 is fixed and a disabled-hook live regression passes.
+Implemented correction: before replacing the managed plugin, the backend
+installer writes a durable activation marker and emits
+`OPENCODE_RESTART_REQUIRED`. Full setup prefers the V2 `opencode2` service
+command, restarts the service, clears the marker only after success, and only
+then runs Doctor. Doctor reports unhealthy while the marker exists, so an
+on-disk update cannot silently pass readiness with an older in-memory plugin.
+The lower-level backend installer intentionally leaves activation to full
+setup. Keep the current hook until upstream issue #48741 is fixed and a
+disabled-hook live regression passes.
 
-Regression coverage: test install/update followed by service reload and a
-live exhaustion/final-synthesis probe; assert the omit event and successful
-final text. Never log request bodies or auth.
+Regression coverage includes crash-safe marker creation, Doctor rejection of
+an unactivated generation, and metadata-independent wire-body rewrite tests.
+A live exhaustion/final-synthesis probe should assert
+the omit event and successful final text before release. Never log request
+bodies or auth.
 
 Removal/recheck criteria: same as the tracked upstream issue — upstream
 confirms a fix, the installed OpenCode version contains it, and the live

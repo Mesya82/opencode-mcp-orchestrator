@@ -56,9 +56,27 @@ parts before a subsequent provider request so Console/Zen does not receive
 encrypted reasoning issued to a different upstream caller. Text and tool
 history remain available to the delegated agent; other agents and models are
 unchanged. A provider HTTP-request hook also removes `tool_choice: "none"` only
-from a primary orchestrator Muse request whose tool list is absent or empty.
-This lets Console use its supported `auto` default for final synthesis without
-weakening the final-step tool prohibition.
+from an OpenCode Muse request whose tool list is absent or empty. It does not
+depend on unstable hook `kind`, `agent`, or model-ID metadata; the model is
+validated from the request body. This lets Console use its
+supported `auto` default for final synthesis without weakening the final-step
+tool prohibition.
+
+`config/existing-container-runtime.mjs` is the shared admission and immutable
+binding boundary used by both the bridge and plugin. The bridge resolves a
+parent-selected display name once, before session creation, and stores only a
+validated capability v2 containing the display name, immutable container ID,
+pinned runtime path, pinned environment, cwd mapping intent, and host worktree.
+The plugin rejects older or unknown capability shapes, re-inspects the pinned
+ID and repeats admission before each command, and executes only by ID.
+
+Existing-container commands run beneath an authenticated Linux/Python 3
+subreaper supervisor. Same-session calls serialize. Only an authenticated
+completion after descendant reaping removes the activity marker; unsupported
+backends, supervisor failure, and unconfirmed cleanup retain quarantine for
+explicit operator recovery. The parent-selected container remains a trusted
+capability boundary for its pre-existing mounts, devices, credentials,
+services, and network.
 
 Provides the structured sandbox tools required by Worker and Runner.
 
@@ -90,7 +108,12 @@ Installation is split into small components:
 
 `setup.mjs` composes those pieces. Configuration is completed before the
 OpenCode backend is installed so agent definitions can be rendered with the
-selected limits while retaining managed-file ownership checks.
+selected limits while retaining managed-file ownership checks. Updating the
+managed plugin writes a durable activation marker before replacing the file.
+Full setup restarts the
+OpenCode service, clears that marker only after success, and then runs Doctor;
+the lower-level backend installer leaves `OPENCODE_RESTART_REQUIRED` visible
+for operators that invoke it directly.
 
 ## Release design
 
