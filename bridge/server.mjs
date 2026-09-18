@@ -1401,6 +1401,13 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
    * session. Diagnostic mode interrupts unsuccessful work but preserves the
    * session for postmortem inspection.
    */
+  const cleanupWorkerContainerCapability = async () => {
+    await removeWorkerContainerCapability(
+      workerContainerCapabilityFile,
+      overrides,
+    )
+  }
+
   const cleanupOnce = async () => {
     if (cleanupAttempted) {
       return cleanupResult
@@ -1412,11 +1419,7 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
     cleanupAttempted = true
 
-    await removeWorkerContainerCapability(
-      workerContainerCapabilityFile,
-      overrides,
-    )
-    workerContainerCapabilityFile = undefined
+    await cleanupWorkerContainerCapability()
 
     cleanupResult = await cleanupSession(
       sessionClient,
@@ -1439,6 +1442,14 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
 
   const reconcileLateWriter = async () => {
     const result = await cleanupOnce()
+
+    /*
+     * Capability installation may have completed after an earlier timeout or
+     * cancellation cleanup already ran. Removal is intentionally idempotent
+     * and retried after the background work settles so a late-created session
+     * capability cannot be orphaned.
+     */
+    await cleanupWorkerContainerCapability()
 
     if (result?.preserved === true) {
       preserveWriter(directory, sessionID)
@@ -1491,13 +1502,27 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
         role === "worker" &&
         overrides.workerExecution?.kind === "existing_container"
       ) {
+        const capabilityRoot =
+          overrides.workerContainerCapabilityRoot ??
+          WORKER_CONTAINER_CAPABILITY_ROOT
+
+        /*
+         * Record the expected path before awaiting creation. Timeout cleanup
+         * can therefore remove a capability that appeared concurrently, and
+         * late reconciliation retries the same path after installation settles.
+         */
         workerContainerCapabilityFile =
-          await installWorkerContainerCapability(
+          workerContainerCapabilityPath(
             sessionID,
-            directory,
-            overrides.workerExecution,
-            overrides,
+            capabilityRoot,
           )
+
+        await installWorkerContainerCapability(
+          sessionID,
+          directory,
+          overrides.workerExecution,
+          overrides,
+        )
       }
 
       await client.session.switchAgent(
