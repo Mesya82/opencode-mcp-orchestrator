@@ -4,3 +4,9 @@ export function workerContainerCapabilityPath(
   sessionID: string,
   root?: string,
 ): string
+
+
+export function workerContainerActivityPath(
+  sessionID: string,
+  root?: string,
+): string
