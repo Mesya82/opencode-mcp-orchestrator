@@ -1793,6 +1793,12 @@ export function validateExistingContainerInspect(
     const destination = mount.Destination
     const writable = mount.RW
 
+    if (source === "/" && writable) {
+      throw new Error(
+        "refusing existing container with writable host root mount",
+      )
+    }
+
     if (
       writable &&
       isAbsolute(source) &&
@@ -1809,12 +1815,6 @@ export function validateExistingContainerInspect(
     ) {
       throw new Error(
         "refusing existing container with writable access to worker capability storage",
-      )
-    }
-
-    if (source === "/" && writable) {
-      throw new Error(
-        "refusing existing container with writable host root mount",
       )
     }
 
