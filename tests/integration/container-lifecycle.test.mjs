@@ -7,7 +7,7 @@ import {
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 import test from "node:test"
 
 import {
@@ -176,17 +176,17 @@ test(
 
 
 test(
-  "successful detached writer is detected and leaves managed execution unconfirmed",
+  "persistent helper is reaped and a second verification command can run",
   { skip: !enabled },
   async () => {
     const root =
       mkdtempSync(
-        join(tmpdir(), "container-detached-integration-"),
+        join(tmpdir(), "container-helper-integration-"),
       )
     const workspace =
       join(root, "workspace")
     const container =
-      "opencode-detached-" +
+      "opencode-helper-" +
       process.pid +
       "-" +
       Date.now()
@@ -221,8 +221,10 @@ test(
 
       const activityPath =
         join(root, "activity")
+      const lateFile =
+        join(workspace, "detached-late.txt")
 
-      const result =
+      const first =
         await runManagedContainerProcess(
           "/usr/bin/docker",
           container,
@@ -233,7 +235,7 @@ test(
           ],
           "/workspace",
           {
-            logPath: join(root, "combined.log"),
+            logPath: join(root, "first.log"),
             activityPath,
             logLimitBytes: 1024 * 1024,
             timeoutMs: 10_000,
@@ -241,12 +243,13 @@ test(
         )
 
       assert.equal(
-        result.terminationConfirmed,
-        false,
+        first.terminationConfirmed,
+        true,
       )
-      assert.ok(
+      assert.equal(
         existsSync(activityPath),
-        "activity marker must remain when detached descendants are detected",
+        false,
+        "activity marker must clear after owned helper cleanup",
       )
 
       await new Promise(
@@ -254,11 +257,40 @@ test(
       )
 
       assert.equal(
-        existsSync(
-          join(workspace, "detached-late.txt"),
-        ),
+        existsSync(lateFile),
+        false,
+        "owned detached helper survived long enough to mutate the worktree",
+      )
+
+      const second =
+        await runManagedContainerProcess(
+          "/usr/bin/docker",
+          container,
+          [
+            "/bin/sh",
+            "-c",
+            "echo verified > /workspace/verified.txt",
+          ],
+          "/workspace",
+          {
+            logPath: join(root, "second.log"),
+            activityPath,
+            logLimitBytes: 1024 * 1024,
+            timeoutMs: 10_000,
+          },
+        )
+
+      assert.equal(second.exitCode, 0)
+      assert.equal(
+        second.terminationConfirmed,
         true,
-        "fixture did not actually keep a detached writer alive",
+      )
+      assert.equal(
+        readFileSync(
+          join(workspace, "verified.txt"),
+          "utf8",
+        ).trim(),
+        "verified",
       )
     } finally {
       docker([
@@ -347,6 +379,183 @@ test(
           encoding: "utf8",
           timeout: 30_000,
           env: process.env,
+        },
+      )
+    }
+  },
+)
+
+
+test(
+  "rootless Podman service endpoint works through validated CONTAINER_HOST",
+  { skip: !podmanEnabled },
+  async () => {
+    assert.ok(
+      existsSync("/usr/bin/podman"),
+      "rootless Podman integration was enabled but /usr/bin/podman is missing",
+    )
+
+    const root =
+      mkdtempSync(
+        join(tmpdir(), "podman-service-integration-"),
+      )
+    const socketPath =
+      join(root, "podman.sock")
+    const endpoint =
+      "unix://" + socketPath
+    const container =
+      "opencode-podman-service-" +
+      process.pid +
+      "-" +
+      Date.now()
+    const service =
+      spawn(
+        "/usr/bin/podman",
+        [
+          "system",
+          "service",
+          "--time=0",
+          endpoint,
+        ],
+        {
+          stdio: ["ignore", "ignore", "pipe"],
+          env: process.env,
+        },
+      )
+
+    let serviceError = ""
+
+    service.stderr?.on(
+      "data",
+      (chunk) => {
+        serviceError += chunk.toString()
+      },
+    )
+
+    try {
+      const deadline =
+        Date.now() + 10_000
+
+      while (
+        !existsSync(socketPath) &&
+        Date.now() < deadline
+      ) {
+        await new Promise(
+          (resolve) => setTimeout(resolve, 50),
+        )
+      }
+
+      assert.ok(
+        existsSync(socketPath),
+        serviceError ||
+          "Podman service socket was not created",
+      )
+
+      const remoteEnv = {
+        ...process.env,
+        CONTAINER_HOST: endpoint,
+      }
+
+      const started =
+        spawnSync(
+          "/usr/bin/podman",
+          [
+            "run",
+            "-d",
+            "--rm",
+            "--name",
+            container,
+            "alpine:3.20",
+            "sleep",
+            "60",
+          ],
+          {
+            encoding: "utf8",
+            timeout: 60_000,
+            env: remoteEnv,
+          },
+        )
+
+      assert.equal(
+        started.status,
+        0,
+        started.stderr || started.stdout,
+      )
+
+      const resolved =
+        resolveExistingContainerRuntime(
+          container,
+          {
+            runtimePaths: [
+              "/usr/bin/podman",
+            ],
+            env: remoteEnv,
+          },
+        )
+
+      assert.equal(
+        resolved.runtime,
+        "/usr/bin/podman",
+      )
+      assert.equal(
+        resolved.env.CONTAINER_HOST,
+        endpoint,
+      )
+
+      assert.throws(
+        () => resolveExistingContainerRuntime(
+          container,
+          {
+            runtimePaths: [
+              "/usr/bin/podman",
+            ],
+            env: {
+              ...remoteEnv,
+              CONTAINER_HOST:
+                "ssh://example.invalid/run/podman.sock",
+            },
+          },
+        ),
+        /CONTAINER_HOST/,
+      )
+    } finally {
+      spawnSync(
+        "/usr/bin/podman",
+        [
+          "rm",
+          "-f",
+          container,
+        ],
+        {
+          encoding: "utf8",
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            CONTAINER_HOST: endpoint,
+          },
+        },
+      )
+
+      try {
+        service.kill("SIGTERM")
+      } catch {
+        // Already exited.
+      }
+
+      await Promise.race([
+        new Promise((resolve) => {
+          service.once("close", resolve)
+        }),
+        new Promise((resolve) => {
+          setTimeout(resolve, 2000)
+        }),
+      ])
+
+      rmSync(
+        root,
+        {
+          recursive: true,
+          force: true,
         },
       )
     }
