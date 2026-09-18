@@ -2056,6 +2056,7 @@ export async function runCancellableLoggedProcess(
     logLimitBytes: number
     timeoutMs: number
     signal?: AbortSignal
+    writeFn?: typeof writeSync
   },
 ): Promise<{
   exitCode: number
@@ -2064,6 +2065,7 @@ export async function runCancellableLoggedProcess(
   elapsedMs: number
   truncated: boolean
   spawnError?: Error
+  logError?: Error
 }> {
   const started = Date.now()
   const logFd = openSync(
@@ -2076,6 +2078,7 @@ export async function runCancellableLoggedProcess(
   let stderrStarted = false
   let timedOut = false
   let aborted = options.signal?.aborted === true
+  let logError: Error | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   let child:
     | ReturnType<typeof spawn>
@@ -2097,8 +2100,20 @@ export async function runCancellableLoggedProcess(
       )
 
       if (keep.length > 0) {
-        writeSync(logFd, keep)
-        written += keep.length
+        try {
+          ;(options.writeFn ?? writeSync)(
+            logFd,
+            keep,
+          )
+          written += keep.length
+        } catch (error) {
+          logError =
+            error instanceof Error
+              ? error
+              : new Error(String(error))
+          killChild()
+          return
+        }
       }
 
       if (keep.length !== buffer.length) {
@@ -2218,6 +2233,9 @@ export async function runCancellableLoggedProcess(
       truncated,
       ...(completion.error
         ? { spawnError: completion.error }
+        : {}),
+      ...(logError
+        ? { logError }
         : {}),
     }
   } finally {
