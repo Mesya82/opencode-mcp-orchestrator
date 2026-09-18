@@ -193,6 +193,12 @@ parent considers appropriate for the task.
 
 Keep the implementation and its focused verification in that Worker session;
 let the Worker use `container_run` and `sandbox_log` for the repair loop.
+Each `container_run` invocation owns and reaps ordinary descendant processes
+before returning, so do not design the loop around a daemon or service started
+by `container_run` surviving into the next call. Persistent infrastructure
+must already be running in the parent-selected container. If cleanup cannot be
+confirmed, treat the fail-closed activity marker/quarantine as an infrastructure
+failure rather than bypassing it.
 Sol still owns architecture, integration, Git operations, and final acceptance.
 
 Do not ask it to perform Git-mutating operations.
