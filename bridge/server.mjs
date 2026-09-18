@@ -1,3 +1,5 @@
+import { chmod } from "node:fs/promises"
+import { lstat } from "node:fs/promises"
 import { mkdir } from "node:fs/promises"
 import { realpath } from "node:fs/promises"
 import { readFile } from "node:fs/promises"
@@ -1187,12 +1189,36 @@ async function installWorkerContainerCapability(
     overrides.workerContainerCapabilityRoot ??
     WORKER_CONTAINER_CAPABILITY_ROOT
   const mkdirFn = overrides.mkdir ?? mkdir
+  const lstatFn = overrides.lstat ?? lstat
+  const chmodFn = overrides.chmod ?? chmod
   const writeFileFn = overrides.writeFile ?? writeFile
 
   await mkdirFn(root, {
     recursive: true,
     mode: 0o700,
   })
+
+  const rootInfo = await lstatFn(root)
+  const currentUid =
+    typeof process.getuid === "function"
+      ? process.getuid()
+      : undefined
+
+  if (
+    rootInfo.isSymbolicLink() ||
+    !rootInfo.isDirectory() ||
+    (
+      currentUid !== undefined &&
+      typeof rootInfo.uid === "number" &&
+      rootInfo.uid !== currentUid
+    )
+  ) {
+    throw new Error(
+      "worker container capability root is unsafe",
+    )
+  }
+
+  await chmodFn(root, 0o700)
 
   const path = workerContainerCapabilityPath(
     sessionID,
@@ -1789,7 +1815,7 @@ export function resolveWorkerExecution(execution) {
   if (
     container === "" ||
     container.length > 256 ||
-    /[\x00-\x1f\x7f]/.test(container)
+    !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(container)
   ) {
     throw new Error(
       "invalid worker existing_container container",
