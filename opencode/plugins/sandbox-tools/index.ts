@@ -1717,6 +1717,82 @@ export function readWorkerContainerCapability(
   return validateWorkerContainerCapability(parsed)
 }
 
+const CONTAINER_RUNTIME_PATH_ENV_KEYS = [
+  "HOME",
+  "XDG_RUNTIME_DIR",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_CACHE_HOME",
+  "CONTAINERS_STORAGE_CONF",
+  "CONTAINERS_CONF",
+  "CONTAINERS_REGISTRIES_CONF",
+] as const
+
+export function containerRuntimeEnv(
+  source: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  const result: Record<string, string> = {
+    PATH: "/usr/bin:/bin",
+  }
+
+  for (const key of CONTAINER_RUNTIME_PATH_ENV_KEYS) {
+    const value = source[key]
+
+    if (value === undefined || value === "") {
+      continue
+    }
+
+    if (
+      !isAbsolute(value) ||
+      /[\0\r\n]/.test(value)
+    ) {
+      throw new Error(
+        `invalid ${key} for existing-container runtime`,
+      )
+    }
+
+    result[key] = value
+  }
+
+  return result
+}
+
+const FIXED_RUNTIME_SOCKET_PATHS = [
+  "/run/docker.sock",
+  "/var/run/docker.sock",
+  "/run/podman/podman.sock",
+  "/run/containerd/containerd.sock",
+  "/var/run/containerd/containerd.sock",
+  "/run/crio/crio.sock",
+  "/var/run/crio/crio.sock",
+]
+
+function sourceMayContainRuntimeSocket(
+  source: string,
+): boolean {
+  if (!isAbsolute(source)) return false
+
+  const normalized = resolve(source)
+
+  for (const socketPath of FIXED_RUNTIME_SOCKET_PATHS) {
+    if (
+      pathIsWithin(
+        normalized,
+        resolve(socketPath),
+      )
+    ) {
+      return true
+    }
+  }
+
+  return (
+    normalized === "/run/user" ||
+    /^\/run\/user\/[0-9]+(?:\/podman(?:\/podman\.sock)?)?$/.test(
+      normalized,
+    )
+  )
+}
+
 export function validateExistingContainerInspect(
   info: unknown,
 ): void {
@@ -1821,7 +1897,7 @@ export function validateExistingContainerInspect(
     }
 
     if (
-      /(?:docker|podman|containerd|cri-o)\.sock(?:$|\/)/i.test(source) ||
+      sourceMayContainRuntimeSocket(source) ||
       /(?:docker|podman|containerd|cri-o)\.sock(?:$|\/)/i.test(destination)
     ) {
       throw new Error(
@@ -1837,6 +1913,7 @@ export function resolveExistingContainerRuntime(
     existsSync?: typeof existsSync
     spawnSync?: typeof spawnSync
     runtimePaths?: readonly string[]
+    env?: NodeJS.ProcessEnv
   },
 ): {
   runtime: string
