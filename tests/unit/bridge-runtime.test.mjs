@@ -33,6 +33,7 @@ import {
   resolveBridgeTimeoutMs,
   resolveCanonicalCwd,
   resolveRunnerSelection,
+  resolveWorkerExecution,
   resolveServerVersion,
   resolveSessionWaitRefreshMs,
   runAgent as runAgentWithConfiguredBudget,
@@ -1774,6 +1775,86 @@ test("worker and writable runner share quarantine while read-only paths stay fre
   })
 
   resetBridgeStateForTests()
+})
+
+test("worker execution defaults to sandbox and validates existing-container grants", () => {
+  assert.deepEqual(
+    resolveWorkerExecution(undefined),
+    {
+      kind: "sandbox",
+      agent: "opencode-orchestrator-worker",
+    },
+  )
+
+  assert.deepEqual(
+    resolveWorkerExecution({
+      kind: "existing_container",
+      container: "dev-box",
+    }),
+    {
+      kind: "existing_container",
+      container: "dev-box",
+      workspaceAccess: "writable",
+      containerCwd: "auto",
+      networkAccess: "inherit",
+      agent: "opencode-orchestrator-worker-container",
+    },
+  )
+
+  assert.equal(
+    resolveWorkerExecution({
+      kind: "existing_container",
+      container: "dev-box",
+      workspace_access: "read_only",
+      container_cwd: "/workspace",
+      network_access: "inherit",
+    }).agent,
+    "opencode-orchestrator-worker-container-readonly",
+  )
+
+  assert.throws(
+    () => resolveWorkerExecution({
+      kind: "existing_container",
+      container: "",
+    }),
+    /invalid worker existing_container container/,
+  )
+  assert.throws(
+    () => resolveWorkerExecution({
+      kind: "existing_container",
+      container: "dev-box",
+      network_access: "host",
+    }),
+    /only "inherit"/,
+  )
+})
+
+test("worker handler binds existing-container execution without exposing container in task", async () => {
+  let captured
+  const handlers = createToolHandlers(async (...args) => {
+    captured = args
+    return "done"
+  })
+
+  const result = await handlers.worker({
+    cwd: "/tmp/work",
+    task: "implement it",
+    execution: {
+      kind: "existing_container",
+      container: "dev-box",
+    },
+  })
+
+  assert.deepEqual(result, {
+    content: [{ type: "text", text: "done" }],
+  })
+  assert.equal(captured[2], "opencode-orchestrator-worker-container")
+  assert.equal(captured[3], "worker")
+  assert.equal(captured[4].workerExecution.container, "dev-box")
+  assert.equal(captured[4].workerExecution.workspaceAccess, "writable")
+  assert.match(captured[1], /container_run/)
+  assert.match(captured[1], /Network access: inherit|network access: inherit/i)
+  assert.doesNotMatch(captured[1], /dev-box/)
 })
 
 test("tool handlers preserve successful response shape and error shape", async () => {
