@@ -10,6 +10,7 @@ import {
   readFileSync,
   readSync,
   readdirSync,
+  writeFileSync,
   realpathSync,
   rmSync,
   statSync,
@@ -29,6 +30,11 @@ import {
   normalizeSandboxRuntime,
   type SandboxRuntimeConfig,
 } from "../../../config/sandbox-runtime.mjs"
+
+import {
+  WORKER_CONTAINER_CAPABILITY_ROOT,
+  workerContainerCapabilityPath,
+} from "../../../config/worker-container-capability.mjs"
 
 import {
   hasNetworklessIsolation,
@@ -1541,6 +1547,507 @@ async function executeSandboxRun(
   }
 }
 
+
+export const EXISTING_CONTAINER_RUNTIME_PATHS = [
+  "/usr/bin/podman",
+  "/usr/bin/docker",
+] as const
+
+export const CONTAINER_RUN_INPUT_PROPERTY_NAMES = [
+  "argv",
+  "workdir",
+  "timeout_seconds",
+] as const
+
+export interface WorkerContainerCapability {
+  version: 1
+  container: string
+  workspaceAccess: "read_only" | "writable"
+  containerCwd: "auto" | string
+  networkAccess: "inherit"
+  hostCwd: string
+}
+
+export interface ContainerRunInput {
+  argv: string[]
+  workdir?: string
+  timeout_seconds?: number
+}
+
+export function containerRunInputSchema() {
+  return {
+    type: "object" as const,
+    properties: {
+      argv: {
+        type: "array",
+        items: {
+          type: "string",
+        },
+        minItems: 1,
+        maxItems: 256,
+        description:
+          "Executable and arguments to run in the parent-selected container; no shell interpolation is performed",
+      },
+      workdir: {
+        type: "string",
+        minLength: 1,
+        description:
+          "Optional working directory inside the selected container",
+      },
+      timeout_seconds: {
+        type: "integer",
+        minimum: 1,
+        maximum: RUNNER_MAX_TIMEOUT_SECONDS,
+        description:
+          "Maximum runtime in seconds",
+      },
+    },
+    required: ["argv"],
+    additionalProperties: false,
+  }
+}
+
+function validateWorkerContainerCapability(
+  value: unknown,
+): WorkerContainerCapability {
+  if (!isRecord(value) || value.version !== 1) {
+    throw new Error("invalid worker container capability")
+  }
+
+  const {
+    container,
+    workspaceAccess,
+    containerCwd,
+    networkAccess,
+    hostCwd,
+  } = value
+
+  if (
+    typeof container !== "string" ||
+    container.trim() === "" ||
+    /[\x00-\x1f\x7f]/.test(container) ||
+    (
+      workspaceAccess !== "read_only" &&
+      workspaceAccess !== "writable"
+    ) ||
+    (
+      containerCwd !== "auto" &&
+      (
+        typeof containerCwd !== "string" ||
+        !isAbsolute(containerCwd)
+      )
+    ) ||
+    networkAccess !== "inherit" ||
+    typeof hostCwd !== "string" ||
+    !isAbsolute(hostCwd)
+  ) {
+    throw new Error("invalid worker container capability")
+  }
+
+  return value as unknown as WorkerContainerCapability
+}
+
+export function readWorkerContainerCapability(
+  sessionID: string,
+  options?: {
+    root?: string
+    readFileSync?: typeof readFileSync
+  },
+): WorkerContainerCapability {
+  const root =
+    options?.root ??
+    WORKER_CONTAINER_CAPABILITY_ROOT
+  const path =
+    workerContainerCapabilityPath(sessionID, root)
+  const read =
+    options?.readFileSync ?? readFileSync
+
+  let raw: string
+
+  try {
+    raw = read(path, "utf8") as string
+  } catch {
+    throw new Error(
+      "worker container capability is unavailable for this session",
+    )
+  }
+
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new Error("invalid worker container capability")
+  }
+
+  return validateWorkerContainerCapability(parsed)
+}
+
+export function validateExistingContainerInspect(
+  info: unknown,
+): void {
+  if (!isRecord(info)) {
+    throw new Error("invalid existing container inspection result")
+  }
+
+  if (info.State && isRecord(info.State) && info.State.Running !== true) {
+    throw new Error("selected existing container is not running")
+  }
+
+  const hostConfig =
+    isRecord(info.HostConfig)
+      ? info.HostConfig
+      : {}
+
+  if (hostConfig.Privileged === true) {
+    throw new Error(
+      "refusing privileged existing container",
+    )
+  }
+
+  if (hostConfig.PidMode === "host") {
+    throw new Error(
+      "refusing existing container with host PID namespace",
+    )
+  }
+
+  const mounts =
+    Array.isArray(info.Mounts)
+      ? info.Mounts
+      : []
+
+  for (const mount of mounts) {
+    if (!isRecord(mount)) continue
+
+    const source =
+      typeof mount.Source === "string"
+        ? mount.Source
+        : ""
+    const destination =
+      typeof mount.Destination === "string"
+        ? mount.Destination
+        : ""
+    const writable = mount.RW !== false
+
+    if (source === "/" && writable) {
+      throw new Error(
+        "refusing existing container with writable host root mount",
+      )
+    }
+
+    if (
+      /(?:docker|podman|containerd|cri-o)\.sock(?:$|\/)/i.test(source) ||
+      /(?:docker|podman|containerd|cri-o)\.sock(?:$|\/)/i.test(destination)
+    ) {
+      throw new Error(
+        "refusing existing container with container-runtime socket",
+      )
+    }
+  }
+}
+
+export function resolveExistingContainerRuntime(
+  container: string,
+  options?: {
+    existsSync?: typeof existsSync
+    spawnSync?: typeof spawnSync
+    runtimePaths?: readonly string[]
+  },
+): {
+  runtime: string
+  inspect: Record<string, unknown>
+} {
+  const exists =
+    options?.existsSync ?? existsSync
+  const spawn =
+    options?.spawnSync ?? spawnSync
+  const runtimePaths =
+    options?.runtimePaths ??
+    EXISTING_CONTAINER_RUNTIME_PATHS
+
+  const matches: Array<{
+    runtime: string
+    inspect: Record<string, unknown>
+  }> = []
+
+  for (const runtime of runtimePaths) {
+    if (!exists(runtime)) continue
+
+    const result = spawn(
+      runtime,
+      ["inspect", container],
+      {
+        encoding: "utf8",
+        timeout: 15_000,
+        maxBuffer: 2 * 1024 * 1024,
+        env: {
+          PATH: "/usr/bin:/bin",
+        },
+      },
+    )
+
+    if (result.status !== 0 || result.error) {
+      continue
+    }
+
+    let parsed: unknown
+
+    try {
+      parsed = JSON.parse(String(result.stdout ?? ""))
+    } catch {
+      throw new Error(
+        `invalid inspection output from ${runtime}`,
+      )
+    }
+
+    const info =
+      Array.isArray(parsed)
+        ? parsed[0]
+        : parsed
+
+    validateExistingContainerInspect(info)
+
+    matches.push({
+      runtime,
+      inspect: info as Record<string, unknown>,
+    })
+  }
+
+  if (matches.length === 0) {
+    throw new Error(
+      `selected existing container was not found in a supported runtime: ${container}`,
+    )
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `selected existing container is ambiguous across supported runtimes: ${container}`,
+    )
+  }
+
+  return matches[0]
+}
+
+export function buildContainerExecArgs(
+  container: string,
+  argv: readonly string[],
+  workdir?: string,
+): string[] {
+  if (
+    !Array.isArray(argv) ||
+    argv.length === 0 ||
+    argv.some((arg) => typeof arg !== "string" || arg.includes("\0"))
+  ) {
+    throw new Error("container_run argv must contain at least one valid string")
+  }
+
+  return [
+    "exec",
+    ...(workdir
+      ? ["--workdir", workdir]
+      : []),
+    container,
+    ...argv,
+  ]
+}
+
+function resolveContainerRunWorkdir(
+  runtime: string,
+  capability: WorkerContainerCapability,
+  requested: string | undefined,
+): string | undefined {
+  if (requested !== undefined) {
+    if (
+      requested.trim() === "" ||
+      !isAbsolute(requested)
+    ) {
+      throw new Error(
+        "container_run workdir must be an absolute container path",
+      )
+    }
+
+    return requested
+  }
+
+  if (capability.containerCwd !== "auto") {
+    return capability.containerCwd
+  }
+
+  const probe = spawnSync(
+    runtime,
+    [
+      "exec",
+      capability.container,
+      "test",
+      "-d",
+      capability.hostCwd,
+    ],
+    {
+      encoding: "utf8",
+      timeout: 10_000,
+      maxBuffer: 64 * 1024,
+      env: {
+        PATH: "/usr/bin:/bin",
+      },
+    },
+  )
+
+  return probe.status === 0
+    ? capability.hostCwd
+    : undefined
+}
+
+async function executeContainerRun(
+  sessionID: string,
+  input: ContainerRunInput,
+): Promise<{ content: string }> {
+  const capability =
+    readWorkerContainerCapability(sessionID)
+  const { runtime } =
+    resolveExistingContainerRuntime(
+      capability.container,
+    )
+  const limits = resolveSandboxLimits()
+
+  pruneRunnerRuns({
+    retentionMs: limits.runnerRetentionMs,
+    maxRuns: limits.runnerRetentionCount,
+  })
+
+  const timeoutSeconds = Math.max(
+    1,
+    Math.min(
+      input.timeout_seconds ??
+        RUNNER_DEFAULT_TIMEOUT_SECONDS,
+      RUNNER_MAX_TIMEOUT_SECONDS,
+    ),
+  )
+
+  const workdir =
+    resolveContainerRunWorkdir(
+      runtime,
+      capability,
+      input.workdir,
+    )
+
+  ensureRunnerRoot()
+
+  const runDir = mkdtempSync(
+    join(RUNNER_ROOT, "run-"),
+  )
+  const runID = basename(runDir)
+  const combinedLog =
+    join(runDir, "combined.log")
+
+  const beforeStatus =
+    gitStatus(capability.hostCwd)
+
+  const started = Date.now()
+  const result = spawnSync(
+    runtime,
+    buildContainerExecArgs(
+      capability.container,
+      input.argv,
+      workdir,
+    ),
+    {
+      encoding: "utf8",
+      timeout: timeoutSeconds * 1000,
+      maxBuffer: limits.runnerLogLimitBytes,
+      env: {
+        PATH: "/usr/bin:/bin",
+      },
+    },
+  )
+  const elapsedMs = Date.now() - started
+
+  const timedOut =
+    isSpawnTimeout(result)
+  const truncated =
+    (result.error as NodeJS.ErrnoException | undefined)
+      ?.code === "ENOBUFS"
+
+  const stdout =
+    typeof result.stdout === "string"
+      ? result.stdout
+      : ""
+  const stderr =
+    typeof result.stderr === "string"
+      ? result.stderr
+      : ""
+
+  writeFileSync(
+    combinedLog,
+    [
+      stdout,
+      stderr
+        ? `\n[stderr]\n${stderr}`
+        : "",
+    ].join(""),
+    {
+      encoding: "utf8",
+      mode: 0o600,
+    },
+  )
+
+  if (truncated) {
+    writeFileSync(
+      join(runDir, "truncated"),
+      "1",
+      { mode: 0o600 },
+    )
+  }
+
+  const exitCode =
+    Number.isInteger(result.status)
+      ? result.status
+      : timedOut
+        ? 124
+        : 1
+
+  writeFileSync(
+    join(runDir, "exit_code"),
+    String(exitCode),
+    { mode: 0o600 },
+  )
+
+  const afterStatus =
+    gitStatus(capability.hostCwd)
+  const delta =
+    statusDelta(beforeStatus, afterStatus)
+  const bytes =
+    statSync(combinedLog).size
+  const tail =
+    readTail(combinedLog, 7000)
+
+  return {
+    content: [
+      `run_id=${runID}`,
+      `exit_code=${exitCode}`,
+      `timed_out=${timedOut}`,
+      `elapsed_ms=${elapsedMs}`,
+      `log_bytes=${bytes}`,
+      `log_truncated=${truncated}`,
+      `workspace_access=${capability.workspaceAccess}`,
+      "network_access=inherit",
+      `container_workdir=${workdir ?? "<container-default>"}`,
+      `worktree_status_changed=${delta.length > 0}`,
+      delta.length > 0
+        ? "worktree_status_delta:\n" +
+          truncate(
+            delta.slice(0, 30).join("\n"),
+            6000,
+          )
+        : "worktree_status_delta:",
+      tail
+        ? "log_tail:\n" + tail
+        : "log_tail:",
+      "",
+      "Use sandbox_log with this run_id to search or inspect the persisted full log.",
+    ].join("\n"),
+  }
+}
+
 export default Plugin.define({
   id: "local.sandbox-tools",
 
@@ -1827,10 +2334,42 @@ export default Plugin.define({
       })
 
       editor.add({
+        name: "container_run",
+
+        description:
+          "Run argv in the one existing container selected by the parent for this Worker session. " +
+          "The model cannot select a container or access generic Podman/Docker control. Full output is persisted for sandbox_log. " +
+          "The existing container retains its own mounts, devices, credentials, services, and network configuration.",
+
+        input: containerRunInputSchema(),
+
+        options: {
+          codemode: false,
+        },
+
+        execute: async (input, context) => {
+          const sessionID =
+            (context as { sessionID?: unknown } | undefined)
+              ?.sessionID
+
+          if (typeof sessionID !== "string") {
+            throw new Error(
+              "container_run requires an OpenCode session id",
+            )
+          }
+
+          return executeContainerRun(
+            sessionID,
+            input as ContainerRunInput,
+          )
+        },
+      })
+
+      editor.add({
         name: "sandbox_log",
 
         description:
-          "Inspect the persisted output of a previous sandbox_run* execution without loading the whole log into model context. " +
+          "Inspect the persisted output of a previous sandbox_run* or container_run execution without loading the whole log into model context. " +
           "Supports grep, tail, head, and bounded line ranges.",
 
         input: {
