@@ -4,6 +4,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
@@ -262,6 +263,64 @@ test(
         "owned detached helper survived long enough to mutate the worktree",
       )
 
+      const staleToken =
+        "opencode-" + "a".repeat(32)
+      const stalePidFile =
+        join(workspace, "stale-helper.pid")
+
+      const staleHelper =
+        docker([
+          "exec",
+          container,
+          "/bin/sh",
+          "-c",
+          "export OPENCODE_MCP_MANAGED_TOKEN=\"$1\"; setsid sh -c 'echo $$ > /workspace/stale-helper.pid; sleep 30' </dev/null >/dev/null 2>&1 &",
+          "sh",
+          staleToken,
+        ])
+
+      assert.equal(
+        staleHelper.status,
+        0,
+        staleHelper.stderr || staleHelper.stdout,
+      )
+
+      const staleDeadline =
+        Date.now() + 5_000
+
+      while (
+        !existsSync(stalePidFile) &&
+        Date.now() < staleDeadline
+      ) {
+        await new Promise(
+          (resolve) => setTimeout(resolve, 25),
+        )
+      }
+
+      assert.ok(
+        existsSync(stalePidFile),
+        "stale owned helper did not start",
+      )
+
+      const stalePid =
+        readFileSync(
+          stalePidFile,
+          "utf8",
+        ).trim()
+
+      writeFileSync(
+        activityPath,
+        JSON.stringify({
+          version: 1,
+          container,
+          token: staleToken,
+        }) + "\n",
+        {
+          encoding: "utf8",
+          mode: 0o600,
+        },
+      )
+
       const second =
         await runManagedContainerProcess(
           "/usr/bin/docker",
@@ -284,6 +343,29 @@ test(
       assert.equal(
         second.terminationConfirmed,
         true,
+      )
+
+      const staleProbe =
+        docker([
+          "exec",
+          container,
+          "/bin/sh",
+          "-c",
+          'test ! -d "/proc/$1"',
+          "sh",
+          stalePid,
+        ])
+
+      assert.equal(
+        staleProbe.status,
+        0,
+        staleProbe.stderr ||
+          staleProbe.stdout,
+      )
+      assert.equal(
+        existsSync(activityPath),
+        false,
+        "stale activity marker was not recovered",
       )
       assert.equal(
         readFileSync(
