@@ -39,6 +39,7 @@ import sandboxPlugin, {
   buildContainerExecArgs,
   containerRunInputSchema,
   readWorkerContainerCapability,
+  runCancellableLoggedProcess,
   resolveContainerRunWorkdir,
   resolveExistingContainerRuntime,
   validateExistingContainerInspect,
@@ -406,6 +407,35 @@ test("existing-container admission rejects dangerous host capabilities", () => {
   )
 })
 
+test("existing-container admission rejects writable mounts overlapping capability storage", () => {
+  assert.throws(
+    () => validateExistingContainerInspect({
+      State: { Running: true },
+      HostConfig: { Privileged: false, PidMode: "" },
+      Mounts: [{
+        Type: "bind",
+        Source: "/tmp",
+        Destination: "/host-tmp",
+        RW: true,
+      }],
+    }),
+    /worker capability storage/,
+  )
+
+  assert.doesNotThrow(
+    () => validateExistingContainerInspect({
+      State: { Running: true },
+      HostConfig: { Privileged: false, PidMode: "" },
+      Mounts: [{
+        Type: "bind",
+        Source: "/tmp",
+        Destination: "/host-tmp",
+        RW: false,
+      }],
+    }),
+  )
+})
+
 test("existing-container admission fails closed on malformed security fields", () => {
   for (const bad of [
     {
@@ -588,6 +618,90 @@ test("worker container capability is session-bound and validates stored state", 
     }),
     /session id/,
   )
+})
+
+test("async logged process aborts promptly without blocking the event loop", async () => {
+  const dir = mkdtempSync(
+    join(tmpdir(), "container-run-abort-"),
+  )
+
+  try {
+    const controller = new AbortController()
+    const logPath = join(dir, "combined.log")
+    let eventLoopProgressed = false
+
+    const run = runCancellableLoggedProcess(
+      process.execPath,
+      [
+        "-e",
+        "setInterval(() => {}, 1000)",
+      ],
+      {
+        logPath,
+        logLimitBytes: 4096,
+        timeoutMs: 5000,
+        signal: controller.signal,
+      },
+    )
+
+    await new Promise((resolve) => {
+      setTimeout(() => {
+        eventLoopProgressed = true
+        resolve()
+      }, 25)
+    })
+
+    controller.abort()
+
+    const result = await Promise.race([
+      run,
+      new Promise((_, reject) => {
+        setTimeout(
+          () => reject(
+            new Error("cancellable process did not terminate promptly"),
+          ),
+          1000,
+        )
+      }),
+    ])
+
+    assert.equal(eventLoopProgressed, true)
+    assert.equal(result.aborted, true)
+    assert.equal(result.timedOut, false)
+    assert.ok(result.elapsedMs < 1000)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test("async logged process truncates persisted output without changing successful exit", async () => {
+  const dir = mkdtempSync(
+    join(tmpdir(), "container-run-log-cap-"),
+  )
+
+  try {
+    const logPath = join(dir, "combined.log")
+    const result = await runCancellableLoggedProcess(
+      process.execPath,
+      [
+        "-e",
+        'process.stdout.write("x".repeat(64 * 1024))',
+      ],
+      {
+        logPath,
+        logLimitBytes: 1024,
+        timeoutMs: 5000,
+      },
+    )
+
+    assert.equal(result.exitCode, 0)
+    assert.equal(result.timedOut, false)
+    assert.equal(result.aborted, false)
+    assert.equal(result.truncated, true)
+    assert.equal(statSync(logPath).size, 1024)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test("synchronous spawn options carry finite timeouts", () => {
