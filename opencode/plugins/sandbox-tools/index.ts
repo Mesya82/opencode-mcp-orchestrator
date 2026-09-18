@@ -2598,7 +2598,7 @@ export async function runManagedContainerProcess(
 
     try {
       child?.stdin?.write(
-        token + ":go\\n",
+        token + ":go\n",
       )
       commandStarted = true
     } catch (error) {
