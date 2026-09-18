@@ -451,7 +451,29 @@ Runner and can be inspected with `sandbox_log`. Existing containers are not
 sandboxes created by this project: they retain whatever mounts, devices,
 credentials, services, and network access they already have. Generic admission
 checks reject clearly unsafe cases such as privileged containers, host-PID
-containers, writable host-root mounts, and mounted container-runtime sockets.
+containers, writable host-root mounts, and mounts that expose known system or
+rootless Docker/Podman/containerd/CRI-O administration sockets even when the
+destination is renamed or the bind is read-only.
+
+Runtime discovery uses only fixed Docker/Podman executable paths plus a
+validated local runtime environment. Rootless Podman may use
+`CONTAINER_HOST`, but only the form `unix:///absolute/canonical/path` is
+accepted; remote transports are rejected. The resolved runtime environment is
+captured once and reused for inspect, exec, cleanup, and verification.
+
+`container_run` has a deliberately bounded process-lifecycle contract.
+Ordinary descendants inherit a per-invocation ownership token, and any
+token-owned processes still running when the command finishes, times out, or
+is cancelled are killed and verified gone before the activity marker is
+cleared. This means build helpers such as a Gradle daemon started by a
+`container_run` call are not persistent across calls; use services that were
+already running in the selected development container when persistence is
+required. Deliberately erasing the ownership token and escaping this boundary
+is unsupported. If owned-process cleanup cannot be confirmed, the activity
+marker is retained and writable delegation remains fail-closed; a later
+`container_run` first attempts bounded stale-marker recovery before starting
+new work.
+
 The parent remains responsible for selecting an appropriate existing
 development container. `workspace_access` describes intended project mutation
 semantics; it cannot remove unrelated capabilities from a pre-existing
