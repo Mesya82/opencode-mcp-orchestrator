@@ -1437,6 +1437,68 @@ test("configured caller-budget preflight preserves fail-closed config loading", 
   }
 })
 
+test("late container capability creation is removed after timeout cleanup", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-capability-race-", async (dir) => {
+    let releaseWrite
+    const writeGate = new Promise((resolve) => {
+      releaseWrite = resolve
+    })
+    let capabilityExists = false
+    const removalStates = []
+    const { client } = makeFakeClient()
+
+    const operation = runAgent(
+      dir,
+      "container worker task",
+      "opencode-orchestrator-worker-container",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 30,
+        workerContainerCapabilityRoot: join(dir, "caps"),
+        workerExecution: {
+          kind: "existing_container",
+          container: "dev-box",
+          workspaceAccess: "writable",
+          containerCwd: "auto",
+          networkAccess: "inherit",
+        },
+        writeFile: async () => {
+          await writeGate
+          capabilityExists = true
+        },
+        rm: async () => {
+          removalStates.push(capabilityExists)
+          capabilityExists = false
+        },
+      },
+    )
+
+    await assert.rejects(
+      () => operation,
+      /timed out/,
+    )
+
+    assert.ok(
+      removalStates.some((state) => state === false),
+      "timeout cleanup should attempt removal before the blocked write completes",
+    )
+
+    releaseWrite()
+
+    await waitFor(
+      () => removalStates.some((state) => state === true),
+    )
+
+    assert.equal(capabilityExists, false)
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("writer quarantine frees only after confirmed removal", async () => {
   resetBridgeStateForTests()
 
