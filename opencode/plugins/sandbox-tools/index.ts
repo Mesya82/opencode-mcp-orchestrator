@@ -2733,7 +2733,8 @@ export async function runManagedContainerProcess(
 
   const abnormalLauncherExit =
     completion?.error !== undefined ||
-    completion?.signal !== null
+    completion?.signal !== null ||
+    !Number.isInteger(completion?.code)
 
   const needsTermination =
     commandStarted &&
