@@ -3553,6 +3553,7 @@ export default Plugin.define({
         description:
           "Run argv in the one existing container selected by the parent for this Worker session. " +
           "The model cannot select a container or access generic Podman/Docker control. Output is persisted outside model context up to the configured runner safety cap for sandbox_log; excess output is drained and marked truncated. " +
+          "Processes started by this invocation must remain inside the managed ownership boundary: ordinary descendants inherit a per-run token and are reaped before return, so do not rely on starting persistent daemons or services with container_run. Pre-existing container services are unaffected. " +
           "The existing container retains its own mounts, devices, credentials, services, and network configuration.",
 
         input: containerRunInputSchema(),
