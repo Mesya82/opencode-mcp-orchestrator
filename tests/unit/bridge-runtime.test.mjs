@@ -1822,6 +1822,13 @@ test("worker execution defaults to sandbox and validates existing-container gran
   assert.throws(
     () => resolveWorkerExecution({
       kind: "existing_container",
+      container: "--remote",
+    }),
+    /invalid worker existing_container container/,
+  )
+  assert.throws(
+    () => resolveWorkerExecution({
+      kind: "existing_container",
       container: "dev-box",
       network_access: "host",
     }),
