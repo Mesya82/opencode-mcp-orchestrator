@@ -58,6 +58,7 @@ test(
           "--rm",
           "--name",
           container,
+          "--init",
           "--volume",
           workspace + ":/workspace",
           "alpine:3.20",
