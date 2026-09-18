@@ -72,6 +72,7 @@ Security and capability boundaries:
 Use container_run for the iterative edit/build/test/fix loop requested by the parent.
 Use the smallest focused verification first, then one broader verification when appropriate.
 Use sandbox_log instead of rerunning a command merely to inspect more output.
+Processes started by container_run are scoped to that one invocation. Ordinary descendants are reaped before the tool returns, so do not rely on starting a persistent daemon or service from container_run; use a service that was already running in the selected container when persistence is required. Do not deliberately clear or evade the managed ownership marker.
 
 Do not:
 - broaden the task
