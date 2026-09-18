@@ -39,6 +39,7 @@ import sandboxPlugin, {
   buildContainerExecArgs,
   containerRunInputSchema,
   readWorkerContainerCapability,
+  resolveContainerRunWorkdir,
   resolveExistingContainerRuntime,
   validateExistingContainerInspect,
   omitUnsupportedMuseFinalToolChoice,
@@ -358,6 +359,7 @@ test("existing-container admission rejects dangerous host capabilities", () => {
       HostConfig: { Privileged: false, PidMode: "" },
       Mounts: [
         {
+          Type: "bind",
           Source: "/home/me/project",
           Destination: "/workspace",
           RW: true,
@@ -369,7 +371,7 @@ test("existing-container admission rejects dangerous host capabilities", () => {
   assert.throws(
     () => validateExistingContainerInspect({
       State: { Running: true },
-      HostConfig: { Privileged: true },
+      HostConfig: { Privileged: true, PidMode: "" },
       Mounts: [],
     }),
     /privileged/,
@@ -378,8 +380,13 @@ test("existing-container admission rejects dangerous host capabilities", () => {
   assert.throws(
     () => validateExistingContainerInspect({
       State: { Running: true },
-      HostConfig: { Privileged: false },
-      Mounts: [{ Source: "/", Destination: "/host", RW: true }],
+      HostConfig: { Privileged: false, PidMode: "" },
+      Mounts: [{
+        Type: "bind",
+        Source: "/",
+        Destination: "/host",
+        RW: true,
+      }],
     }),
     /host root/,
   )
@@ -387,14 +394,145 @@ test("existing-container admission rejects dangerous host capabilities", () => {
   assert.throws(
     () => validateExistingContainerInspect({
       State: { Running: true },
-      HostConfig: { Privileged: false },
+      HostConfig: { Privileged: false, PidMode: "" },
       Mounts: [{
+        Type: "bind",
         Source: "/run/podman/podman.sock",
         Destination: "/run/podman/podman.sock",
         RW: true,
       }],
     }),
     /runtime socket/,
+  )
+})
+
+test("existing-container admission fails closed on malformed security fields", () => {
+  for (const bad of [
+    {
+      State: { Running: true },
+      Mounts: [],
+    },
+    {
+      State: { Running: true },
+      HostConfig: {},
+      Mounts: [],
+    },
+    {
+      State: { Running: true },
+      HostConfig: { Privileged: false, PidMode: "" },
+    },
+    {
+      State: { Running: true },
+      HostConfig: { Privileged: false, PidMode: "" },
+      Mounts: [{}],
+    },
+    {
+      State: { Running: true },
+      HostConfig: { Privileged: false, PidMode: "" },
+      Mounts: [{
+        Type: "bind",
+        Source: "/home/me/project",
+        Destination: "/workspace",
+        RW: "yes",
+      }],
+    },
+  ]) {
+    assert.throws(
+      () => validateExistingContainerInspect(bad),
+      /invalid existing container inspection/,
+    )
+  }
+})
+
+test("container cwd auto mode maps the canonical host worktree through inspected mounts", () => {
+  const capability = {
+    version: 1,
+    container: "dev-box",
+    workspaceAccess: "writable",
+    containerCwd: "auto",
+    networkAccess: "inherit",
+    hostCwd: "/home/me/project/packages/app",
+  }
+
+  assert.equal(
+    resolveContainerRunWorkdir(
+      capability,
+      undefined,
+      {
+        Mounts: [
+          {
+            Source: "/home/me",
+            Destination: "/host-home",
+            RW: true,
+          },
+          {
+            Source: "/home/me/project",
+            Destination: "/workspace",
+            RW: true,
+          },
+        ],
+      },
+    ),
+    "/workspace/packages/app",
+  )
+})
+
+test("container cwd auto mode refuses same-named but unproven container directories", () => {
+  const capability = {
+    version: 1,
+    container: "dev-box",
+    workspaceAccess: "writable",
+    containerCwd: "auto",
+    networkAccess: "inherit",
+    hostCwd: "/home/me/project",
+  }
+
+  assert.throws(
+    () => resolveContainerRunWorkdir(
+      capability,
+      undefined,
+      {
+        Mounts: [{
+          Source: "/different/source",
+          Destination: "/home/me/project",
+          RW: true,
+        }],
+      },
+    ),
+    /set execution\.container_cwd explicitly/,
+  )
+
+  assert.equal(
+    resolveContainerRunWorkdir(
+      capability,
+      "/explicit/workspace",
+      { Mounts: [] },
+    ),
+    "/explicit/workspace",
+  )
+})
+
+test("writable auto mapping rejects a read-only workspace mount", () => {
+  assert.throws(
+    () => resolveContainerRunWorkdir(
+      {
+        version: 1,
+        container: "dev-box",
+        workspaceAccess: "writable",
+        containerCwd: "auto",
+        networkAccess: "inherit",
+        hostCwd: "/home/me/project",
+      },
+      undefined,
+      {
+        Mounts: [{
+          Source: "/home/me/project",
+          Destination: "/workspace",
+          RW: false,
+        }],
+      },
+    ),
+    /read-only container mount/,
   )
 })
 
