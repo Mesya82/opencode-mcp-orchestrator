@@ -47,6 +47,8 @@ The pre-existing container retains its own mounts, devices, credentials, service
 
 Use sandbox_log to inspect persisted command output without rerunning commands.
 
+Processes started by container_run are scoped to that one invocation. Ordinary descendants are reaped before the tool returns, so do not rely on starting a persistent daemon or service from container_run; use a service that was already running in the selected container when persistence is required. Do not deliberately clear or evade the managed ownership marker.
+
 Do not:
 - broaden the task
 - launch another agent
