@@ -2930,6 +2930,59 @@ async function executeContainerRun(
   }
 }
 
+export function resolveSandboxLogSpawnResult(
+  result: {
+    status?: number | null
+    signal?: unknown
+    error?: unknown
+    stdout?: unknown
+  },
+): {
+  exitCode: number
+  timedOut: boolean
+  failed: boolean
+  truncated: boolean
+  output: string
+} {
+  const timedOut =
+    isSpawnTimeout(result)
+  const errorCode =
+    isRecord(result.error) &&
+    typeof result.error.code === "string"
+      ? result.error.code
+      : undefined
+  const truncated =
+    errorCode === "ENOBUFS"
+  const signaled =
+    result.signal !== null &&
+    result.signal !== undefined
+  const failed =
+    result.error !== null &&
+    result.error !== undefined ||
+    signaled
+  const exitCode =
+    Number.isInteger(result.status)
+      ? result.status as number
+      : timedOut
+        ? 124
+        : failed
+          ? 1
+          : 0
+  const output =
+    typeof result.stdout === "string"
+      ? result.stdout
+      : ""
+
+  return {
+    exitCode,
+    timedOut,
+    failed,
+    truncated,
+    output,
+  }
+}
+
+
 export default Plugin.define({
   id: "local.sandbox-tools",
 
@@ -3457,27 +3510,36 @@ export default Plugin.define({
             sandboxLogSpawnOptions(),
           )
 
-          const timedOut =
-            isSpawnTimeout(result)
+          const summary =
+            resolveSandboxLogSpawnResult(result)
 
-          const output =
-            result.stdout ?? ""
+          const boundedOutput =
+            summary.output
+              ? truncate(
+                  summary.output,
+                  logLimits.shellMaxOutputBytes,
+                )
+              : ""
 
           return {
             content: [
               `run_id=${run_id}`,
               `mode=${mode}`,
-              `tool_exit_code=${result.status ?? 0}`,
-              `timed_out=${timedOut}`,
-              timedOut && !output
+              `tool_exit_code=${summary.exitCode}`,
+              `timed_out=${summary.timedOut}`,
+              `tool_failed=${summary.failed}`,
+              `output_truncated=${summary.truncated}`,
+              summary.timedOut && !boundedOutput
                 ? `result:\n[sandbox_log timed out after ${SANDBOX_LOG_TIMEOUT_MS}ms]`
-                : output
-                  ? "result:\n" +
-                    truncate(
-                      output,
-                      logLimits.shellMaxOutputBytes,
-                    )
-                  : "result:",
+                : summary.truncated
+                  ? "result:\n[sandbox_log output truncated by inspection safety cap]\n" +
+                    boundedOutput
+                  : boundedOutput
+                    ? "result:\n" +
+                      boundedOutput
+                    : summary.failed
+                      ? "result:\n[sandbox_log inspection failed]"
+                      : "result:",
             ].join("\n"),
           }
         },
