@@ -2835,20 +2835,21 @@ async function executeContainerRun(
   const runID = basename(runDir)
   const combinedLog =
     join(runDir, "combined.log")
+  const activityPath =
+    workerContainerActivityPath(sessionID)
 
   const beforeStatus =
     gitStatus(capability.hostCwd)
 
   const result =
-    await runCancellableLoggedProcess(
+    await runManagedContainerProcess(
       runtime,
-      buildContainerExecArgs(
-        capability.container,
-        input.argv,
-        workdir,
-      ),
+      capability.container,
+      input.argv,
+      workdir,
       {
         logPath: combinedLog,
+        activityPath,
         logLimitBytes:
           limits.runnerLogLimitBytes,
         timeoutMs:
@@ -2871,10 +2872,20 @@ async function executeContainerRun(
     { mode: 0o600 },
   )
 
+  if (!result.terminationConfirmed) {
+    throw new Error(
+      "container_run could not confirm termination of the in-container command; writer state remains quarantined",
+    )
+  }
+
+  if (result.logError) {
+    throw new Error(
+      "container_run log persistence failed; the in-container command was terminated before returning",
+    )
+  }
+
   const afterStatus =
-    result.aborted
-      ? beforeStatus
-      : gitStatus(capability.hostCwd)
+    gitStatus(capability.hostCwd)
   const delta =
     statusDelta(beforeStatus, afterStatus)
   const bytes =
@@ -2888,6 +2899,7 @@ async function executeContainerRun(
       `exit_code=${result.exitCode}`,
       `timed_out=${result.timedOut}`,
       `cancelled=${result.aborted}`,
+      `termination_confirmed=${result.terminationConfirmed}`,
       `elapsed_ms=${result.elapsedMs}`,
       `log_bytes=${bytes}`,
       `log_truncated=${result.truncated}`,
