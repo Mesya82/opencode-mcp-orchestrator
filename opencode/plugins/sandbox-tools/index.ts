@@ -2424,8 +2424,6 @@ export async function runCancellableLoggedProcess(
   }
 }
 
-const MANAGED_DETACHED_PROCESS_EXIT_CODE = 197
-
 const MANAGED_CONTAINER_LAUNCHER = [
   'inner="$1"',
   'shift',
@@ -2437,351 +2435,112 @@ const MANAGED_CONTAINER_LAUNCHER = [
   '  exit 126',
   'fi',
   '',
+  'export OPENCODE_MCP_MANAGED_TOKEN="$token"',
   'exec setsid /bin/sh -c "$inner" sh "$token" "$@"',
 ].join("\n")
 
 const MANAGED_CONTAINER_WRAPPER = [
-  "token=\"$1\"",
-  "shift",
-  "baseline=\"/tmp/.opencode-managed-$token.baseline\"",
-  "",
-  "for required in setsid tr grep; do",
-  "  if ! command -v \"$required\" >/dev/null 2>&1; then",
-  "    printf \"%s:error:required-tool-unavailable:%s\\n\" \"$token\" \"$required\"",
-  "    exit 126",
-  "  fi",
-  "done",
-  "",
-  ": > \"$baseline\" || exit 126",
-  "chmod 600 \"$baseline\" 2>/dev/null || true",
-  "",
-  "(",
-  "  for path in /proc/[0-9]*; do",
-  "    pid=\"${path##*/}\"",
-  "    IFS= read -r stat < \"$path/stat\" || continue",
-  "    rest=\"${stat##*) }\"",
-  "    set -- $rest",
-  "    state=\"$1\"",
-  "    starttime=\"${20}\"",
-  "    [ \"$state\" = \"Z\" ] && continue",
-  "    printf \"%s:%s\\n\" \"$pid\" \"$starttime\"",
-  "  done",
-  ") > \"$baseline\" || exit 126",
-  "",
-  "printf \"%s:ready:%s\\n\" \"$token\" \"$$\"",
-  "",
-  "IFS= read -r ack || exit 125",
-  "[ \"$ack\" = \"$token:go\" ] || exit 125",
-  "",
-  "export OPENCODE_MCP_MANAGED_TOKEN=\"$token\"",
-  "\"$@\"",
-  "status=$?",
-  "",
-  "# Give ordinary short-lived grandchildren a bounded grace period to exit.",
-  "sleep 0.2",
-  "",
-  "detached=0",
-  "for path in /proc/[0-9]*; do",
-  "  pid=\"${path##*/}\"",
-  "  [ \"$pid\" = \"$$\" ] && continue",
-  "  if [ -r \"$path/environ\" ] && tr '\\000' '\\n' < \"$path/environ\" 2>/dev/null | grep -Fqx \"OPENCODE_MCP_MANAGED_TOKEN=$token\"; then",
-  "    detached=1",
-  "    break",
-  "  fi",
-  "  IFS= read -r stat < \"$path/stat\" || continue",
-  "  rest=\"${stat##*) }\"",
-  "  set -- $rest",
-  "  state=\"$1\"",
-  "  starttime=\"${20}\"",
-  "  [ \"$state\" = \"Z\" ] && continue",
-  "",
-  "  seen=0",
-  "  while IFS= read -r entry; do",
-  "    if [ \"$entry\" = \"$pid:$starttime\" ]; then",
-  "      seen=1",
-  "      break",
-  "    fi",
-  "  done < \"$baseline\"",
-  "",
-  "  if [ \"$seen\" -eq 0 ]; then",
-  "    detached=1",
-  "    break",
-  "  fi",
-  "done",
-  "",
-  "if [ \"$detached\" -ne 0 ]; then",
-  "  exit 197",
-  "fi",
-  "",
-  "rm -f \"$baseline\"",
-  "exit \"$status\"",
+  'token="$1"',
+  'shift',
+  '',
+  'printf "%s:ready:%s\\n" "$token" "$$"',
+  '',
+  'IFS= read -r ack || exit 125',
+  '[ "$ack" = "$token:go" ] || exit 125',
+  '',
+  '"$@"',
+  'exit $?',
 ].join("\n")
 
-const MANAGED_CONTAINER_TERMINATE = [
-  "pid=\"$1\"",
-  "token=\"$2\"",
-  "baseline=\"/tmp/.opencode-managed-$token.baseline\"",
-  "",
-  "if [ -d \"/proc/$pid\" ]; then",
-  "  stat=\"\"",
-  "  IFS= read -r stat < \"/proc/$pid/stat\" || stat=\"\"",
-  "",
-  "  if [ -n \"$stat\" ]; then",
-  "    rest=\"${stat##*) }\"",
-  "    set -- $rest",
-  "    pgid=\"$3\"",
-  "    [ \"$pgid\" = \"$pid\" ] || exit 4",
-  "  fi",
-  "fi",
-  "",
-  "kill_tree() {",
-  "  target=\"$1\"",
-  "",
-  "  if [ -r \"/proc/$target/task/$target/children\" ]; then",
-  "    IFS= read -r children < \"/proc/$target/task/$target/children\" || children=\"\"",
-  "    for child in $children; do",
-  "      kill_tree \"$child\"",
-  "    done",
-  "  fi",
-  "",
-  "  kill -KILL \"$target\" 2>/dev/null || true",
-  "}",
-  "",
-  "kill_tree \"$pid\"",
-  "kill -KILL \"-$pid\" 2>/dev/null || true",
-  "",
-  "attempt=0",
-  "while [ \"$attempt\" -lt 50 ]; do",
-  "  root_alive=0",
-  "",
-  "  if [ -d \"/proc/$pid\" ]; then",
-  "    stat=\"\"",
-  "    IFS= read -r stat < \"/proc/$pid/stat\" || stat=\"\"",
-  "",
-  "    if [ -n \"$stat\" ]; then",
-  "      rest=\"${stat##*) }\"",
-  "      set -- $rest",
-  "      state=\"$1\"",
-  "      current_pgid=\"$3\"",
-  "",
-  "      if [ \"$state\" != \"Z\" ]; then",
-  "        [ \"$current_pgid\" = \"$pid\" ] || exit 6",
-  "        root_alive=1",
-  "      fi",
-  "    fi",
-  "  fi",
-  "",
-  "  detached=0",
-  "  if [ -f \"$baseline\" ]; then",
-  "    for path in /proc/[0-9]*; do",
-  "      current_pid=\"${path##*/}\"",
-  "      [ \"$current_pid\" = \"$$\" ] && continue",
-  "      [ \"$current_pid\" = \"$pid\" ] && continue",
-  "      if [ -r \"$path/environ\" ] && tr '\\000' '\\n' < \"$path/environ\" 2>/dev/null | grep -Fqx \"OPENCODE_MCP_MANAGED_TOKEN=$token\"; then",
-  "        detached=1",
-  "        break",
-  "      fi",
-  "      IFS= read -r current_stat < \"$path/stat\" || continue",
-  "      rest=\"${current_stat##*) }\"",
-  "      set -- $rest",
-  "      state=\"$1\"",
-  "      starttime=\"${20}\"",
-  "      [ \"$state\" = \"Z\" ] && continue",
-  "",
-  "      seen=0",
-  "      while IFS= read -r entry; do",
-  "        if [ \"$entry\" = \"$current_pid:$starttime\" ]; then",
-  "          seen=1",
-  "          break",
-  "        fi",
-  "      done < \"$baseline\"",
-  "",
-  "      if [ \"$seen\" -eq 0 ]; then",
-  "        detached=1",
-  "        break",
-  "      fi",
-  "    done",
-  "  else",
-  "    detached=1",
-  "  fi",
-  "",
-  "  if [ \"$root_alive\" -eq 0 ] && [ \"$detached\" -eq 0 ]; then",
-  "    rm -f \"$baseline\"",
-  "    exit 0",
-  "  fi",
-  "",
-  "  sleep 0.1",
-  "  attempt=$((attempt + 1))",
-  "done",
-  "",
-  "exit 5",
-].join("\n")
-
-const MANAGED_CONTAINER_PROCESS_SNAPSHOT = [
-  'for path in /proc/[0-9]*; do',
-  '  pid="${path##*/}"',
-  '  [ "$pid" = "$$" ] && continue',
-  '  IFS= read -r stat < "$path/stat" || continue',
-  '  rest="${stat##*) }"',
-  '  set -- $rest',
-  '  state="$1"',
-  '  starttime="${20}"',
-  '  [ "$state" = "Z" ] && continue',
-  '  printf "%s:%s\\n" "$pid" "$starttime"',
+const MANAGED_CONTAINER_CLEANUP_OWNED = [
+  'token="$1"',
+  'marker="OPENCODE_MCP_MANAGED_TOKEN=$token"',
+  '',
+  'for required in tr grep; do',
+  '  if ! command -v "$required" >/dev/null 2>&1; then',
+  '    exit 126',
+  '  fi',
   'done',
+  '',
+  'attempt=0',
+  'while [ "$attempt" -lt 50 ]; do',
+  '  found=0',
+  '',
+  '  for path in /proc/[0-9]*; do',
+  '    pid="${path##*/}"',
+  '    [ "$pid" = "$$" ] && continue',
+  '    [ -r "$path/environ" ] || continue',
+  '',
+  '    if ! tr "\\000" "\\n" < "$path/environ" 2>/dev/null | grep -Fqx "$marker"; then',
+  '      continue',
+  '    fi',
+  '',
+  '    state=""',
+  '    if IFS= read -r stat < "$path/stat"; then',
+  '      rest="${stat##*) }"',
+  '      set -- $rest',
+  '      state="$1"',
+  '    fi',
+  '',
+  '    [ "$state" = "Z" ] && continue',
+  '    found=1',
+  '    kill -KILL "$pid" 2>/dev/null || true',
+  '  done',
+  '',
+  '  [ "$found" -eq 0 ] && exit 0',
+  '',
+  '  sleep 0.1',
+  '  attempt=$((attempt + 1))',
+  'done',
+  '',
+  'exit 5',
 ].join("\n")
 
-async function snapshotManagedContainerProcesses(
-  runtime: string,
-  container: string,
-): Promise<Set<string> | null> {
-  const child = spawn(
-    runtime,
-    buildContainerExecArgs(
-      container,
-      [
-        "/bin/sh",
-        "-c",
-        MANAGED_CONTAINER_PROCESS_SNAPSHOT,
-      ],
-    ),
-    {
-      stdio: ["ignore", "pipe", "pipe"],
-      env: containerRuntimeEnv(),
-    },
-  )
-
-  let stdout = Buffer.alloc(0)
-  let stderrBytes = 0
-  let overflowed = false
-  let timer: ReturnType<typeof setTimeout> | undefined
-
-  child.stdout?.on("data", (chunk) => {
-    const buffer =
-      Buffer.isBuffer(chunk)
-        ? chunk
-        : Buffer.from(String(chunk))
-
-    if (stdout.length + buffer.length > 1024 * 1024) {
-      overflowed = true
-
-      try {
-        child.kill("SIGKILL")
-      } catch {
-        // Already exited.
-      }
-
-      return
-    }
-
-    stdout = Buffer.concat([stdout, buffer])
-  })
-
-  child.stderr?.on("data", (chunk) => {
-    stderrBytes +=
-      Buffer.isBuffer(chunk)
-        ? chunk.length
-        : Buffer.byteLength(String(chunk))
-
-    if (stderrBytes > 64 * 1024) {
-      overflowed = true
-
-      try {
-        child.kill("SIGKILL")
-      } catch {
-        // Already exited.
-      }
-    }
-  })
-
-  try {
-    const completion =
-      await Promise.race([
-        new Promise<{
-          code: number | null
-          error?: Error
-        }>((resolveCompletion) => {
-          let settled = false
-
-          const finish = (
-            value: {
-              code: number | null
-              error?: Error
-            },
-          ) => {
-            if (settled) return
-            settled = true
-            resolveCompletion(value)
-          }
-
-          child.once(
-            "error",
-            (error) => finish({
-              code: null,
-              error,
-            }),
-          )
-
-          child.once(
-            "close",
-            (code) => finish({ code }),
-          )
-        }),
-        new Promise<{
-          code: null
-          error: Error
-        }>((resolveTimeout) => {
-          timer = setTimeout(() => {
-            try {
-              child.kill("SIGKILL")
-            } catch {
-              // Already exited.
-            }
-
-            resolveTimeout({
-              code: null,
-              error: new Error(
-                "container process snapshot timed out",
-              ),
-            })
-          }, 5_000)
-        }),
-      ])
-
-    if (
-      completion.code !== 0 ||
-      completion.error ||
-      overflowed
-    ) {
-      return null
-    }
-
-    const lines =
-      stdout
-        .toString("utf8")
-        .split("\n")
-        .filter(Boolean)
-
-    if (
-      lines.some(
-        (line) =>
-          !/^[1-9][0-9]*:[0-9]+$/.test(line),
-      )
-    ) {
-      return null
-    }
-
-    return new Set(lines)
-  } finally {
-    if (timer) clearTimeout(timer)
-  }
+type ManagedContainerActivity = {
+  version: 1
+  container: string
+  token: string
 }
 
-async function terminateManagedContainerProcess(
+function readManagedContainerActivity(
+  activityPath: string,
+): ManagedContainerActivity | null {
+  if (!existsSync(activityPath)) {
+    return null
+  }
+
+  let parsed: unknown
+
+  try {
+    parsed = JSON.parse(
+      readFileSync(activityPath, "utf8"),
+    )
+  } catch {
+    throw new Error(
+      "invalid existing container activity marker",
+    )
+  }
+
+  if (
+    !isRecord(parsed) ||
+    parsed.version !== 1 ||
+    typeof parsed.container !== "string" ||
+    typeof parsed.token !== "string" ||
+    !/^opencode-[a-f0-9]{32}$/.test(parsed.token)
+  ) {
+    throw new Error(
+      "invalid existing container activity marker",
+    )
+  }
+
+  return parsed as ManagedContainerActivity
+}
+
+async function cleanupOwnedContainerProcesses(
   runtime: string,
   container: string,
-  rootPid: number,
   token: string,
+  runtimeEnv: Readonly<Record<string, string>>,
 ): Promise<boolean> {
   const child = spawn(
     runtime,
@@ -2790,15 +2549,14 @@ async function terminateManagedContainerProcess(
       [
         "/bin/sh",
         "-c",
-        MANAGED_CONTAINER_TERMINATE,
+        MANAGED_CONTAINER_CLEANUP_OWNED,
         "sh",
-        String(rootPid),
         token,
       ],
     ),
     {
       stdio: ["ignore", "ignore", "ignore"],
-      env: containerRuntimeEnv(),
+      env: runtimeEnv,
     },
   )
 
@@ -2837,7 +2595,6 @@ async function terminateManagedContainerProcess(
             (code) => finish({ code }),
           )
         }),
-
         new Promise<{
           code: null
           error: Error
@@ -2852,7 +2609,7 @@ async function terminateManagedContainerProcess(
             resolveTimeout({
               code: null,
               error: new Error(
-                "container termination verification timed out",
+                "container owned-process cleanup timed out",
               ),
             })
           }, 7_000)
@@ -2868,6 +2625,45 @@ async function terminateManagedContainerProcess(
   }
 }
 
+async function recoverManagedContainerActivity(
+  runtime: string,
+  container: string,
+  activityPath: string,
+  runtimeEnv: Readonly<Record<string, string>>,
+): Promise<void> {
+  const stale =
+    readManagedContainerActivity(
+      activityPath,
+    )
+
+  if (!stale) return
+
+  if (stale.container !== container) {
+    throw new Error(
+      "existing container activity marker is bound to another container",
+    )
+  }
+
+  const recovered =
+    await cleanupOwnedContainerProcesses(
+      runtime,
+      container,
+      stale.token,
+      runtimeEnv,
+    )
+
+  if (!recovered) {
+    throw new Error(
+      "container_run cannot recover prior owned processes; writer state remains quarantined",
+    )
+  }
+
+  rmSync(
+    activityPath,
+    { force: true },
+  )
+}
+
 export async function runManagedContainerProcess(
   runtime: string,
   container: string,
@@ -2880,6 +2676,7 @@ export async function runManagedContainerProcess(
     timeoutMs: number
     signal?: AbortSignal
     writeFn?: typeof writeSync
+    runtimeEnv?: Readonly<Record<string, string>>
   },
 ): Promise<{
   exitCode: number
@@ -2892,20 +2689,20 @@ export async function runManagedContainerProcess(
   logError?: Error
 }> {
   const started = Date.now()
+  const runtimeEnv =
+    options.runtimeEnv ??
+    containerRuntimeEnv()
+
+  await recoverManagedContainerActivity(
+    runtime,
+    container,
+    options.activityPath,
+    runtimeEnv,
+  )
+
   const token =
     "opencode-" +
     randomUUID().replaceAll("-", "")
-  const processBaseline =
-    await snapshotManagedContainerProcesses(
-      runtime,
-      container,
-    )
-
-  if (!processBaseline) {
-    throw new Error(
-      "container_run could not establish a process baseline for fail-closed descendant tracking",
-    )
-  }
 
   const logFd = openSync(
     options.logPath,
@@ -2913,19 +2710,24 @@ export async function runManagedContainerProcess(
     0o600,
   )
 
-  writeFileSync(
-    options.activityPath,
-    JSON.stringify({
-      version: 1,
-      container,
-      startedAt: new Date().toISOString(),
-    }) + "\\n",
-    {
-      encoding: "utf8",
-      mode: 0o600,
-      flag: "wx",
-    },
-  )
+  try {
+    writeFileSync(
+      options.activityPath,
+      JSON.stringify({
+        version: 1,
+        container,
+        token,
+      }) + "\\n",
+      {
+        encoding: "utf8",
+        mode: 0o600,
+        flag: "wx",
+      },
+    )
+  } catch (error) {
+    closeSync(logFd)
+    throw error
+  }
 
   let child:
     | ReturnType<typeof spawn>
@@ -3061,7 +2863,7 @@ export async function runManagedContainerProcess(
     if (!match) {
       protocolError =
         new Error(
-          "container_run failed to establish a managed process group",
+          "container_run failed to establish its managed ownership boundary",
         )
       requestStop()
       return
@@ -3071,7 +2873,7 @@ export async function runManagedContainerProcess(
 
     try {
       child?.stdin?.write(
-        token + ":go\n",
+        token + ":go\\n",
       )
       commandStarted = true
     } catch (error) {
@@ -3120,7 +2922,7 @@ export async function runManagedContainerProcess(
       ),
       {
         stdio: ["pipe", "pipe", "pipe"],
-        env: containerRuntimeEnv(),
+        env: runtimeEnv,
       },
     )
 
@@ -3191,62 +2993,15 @@ export async function runManagedContainerProcess(
     closeSync(logFd)
   }
 
-  const abnormalLauncherExit =
-    completion?.error !== undefined ||
-    completion?.signal !== null ||
-    !Number.isInteger(completion?.code)
-
-  const detachedDescendantsDetected =
-    completion?.code ===
-      MANAGED_DETACHED_PROCESS_EXIT_CODE
-
-  const needsTermination =
-    commandStarted &&
-    (
-      aborted ||
-      timedOut ||
-      logError !== undefined ||
-      protocolError !== undefined ||
-      abnormalLauncherExit
+  const terminationConfirmed =
+    await cleanupOwnedContainerProcesses(
+      runtime,
+      container,
+      token,
+      runtimeEnv,
     )
 
-  let terminationConfirmed =
-    !detachedDescendantsDetected
-
-  if (
-    needsTermination &&
-    rootPid !== undefined
-  ) {
-    terminationConfirmed =
-      await terminateManagedContainerProcess(
-        runtime,
-        container,
-        rootPid,
-        token,
-      )
-  }
-
-  if (commandStarted) {
-    const processAfter =
-      await snapshotManagedContainerProcesses(
-        runtime,
-        container,
-      )
-
-    if (
-      !processAfter ||
-      [...processAfter].some(
-        (entry) => !processBaseline.has(entry),
-      )
-    ) {
-      terminationConfirmed = false
-    }
-  }
-
-  if (
-    !commandStarted ||
-    terminationConfirmed
-  ) {
+  if (terminationConfirmed) {
     rmSync(
       options.activityPath,
       { force: true },
@@ -3262,6 +3017,18 @@ export async function runManagedContainerProcess(
           ? 130
           : 1
 
+  const abnormalLauncherExit =
+    completion?.error !== undefined ||
+    completion?.signal !== null ||
+    !Number.isInteger(completion?.code)
+
+  const ownershipError =
+    !terminationConfirmed
+      ? new Error(
+          "container_run could not reap all owned descendants; writer state remains quarantined",
+        )
+      : undefined
+
   return {
     exitCode,
     timedOut,
@@ -3269,25 +3036,24 @@ export async function runManagedContainerProcess(
     elapsedMs: Date.now() - started,
     truncated,
     terminationConfirmed,
-    ...(detachedDescendantsDetected
-      ? {
-          spawnError: new Error(
-            "container_run detected live processes created during the command after its root process exited",
-          ),
-        }
-      : {}),
-    ...(completion?.error
-      ? { spawnError: completion.error }
-      : {}),
+    ...(ownershipError
+      ? { spawnError: ownershipError }
+      : completion?.error
+        ? { spawnError: completion.error }
+        : protocolError
+          ? { spawnError: protocolError }
+          : abnormalLauncherExit
+            ? {
+                spawnError: new Error(
+                  "container runtime client exited without a usable status",
+                ),
+              }
+            : {}),
     ...(logError
       ? { logError }
       : {}),
-    ...(protocolError && !completion?.error
-      ? { spawnError: protocolError }
-      : {}),
   }
 }
-
 
 async function executeContainerRun(
   sessionID: string,
