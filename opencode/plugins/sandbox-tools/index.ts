@@ -11,6 +11,7 @@ import {
   readSync,
   readdirSync,
   writeFileSync,
+  writeSync,
   realpathSync,
   rmSync,
   statSync,
@@ -24,7 +25,7 @@ import {
   resolve,
   sep,
 } from "node:path"
-import { spawnSync } from "node:child_process"
+import { spawn, spawnSync } from "node:child_process"
 
 import {
   normalizeSandboxRuntime,
@@ -1791,6 +1792,25 @@ export function validateExistingContainerInspect(
     const source = mount.Source
     const destination = mount.Destination
     const writable = mount.RW
+
+    if (
+      writable &&
+      isAbsolute(source) &&
+      (
+        pathIsWithin(
+          resolve(source),
+          resolve(WORKER_CONTAINER_CAPABILITY_ROOT),
+        ) ||
+        pathIsWithin(
+          resolve(WORKER_CONTAINER_CAPABILITY_ROOT),
+          resolve(source),
+        )
+      )
+    ) {
+      throw new Error(
+        "refusing existing container with writable access to worker capability storage",
+      )
+    }
 
     if (source === "/" && writable) {
       throw new Error(
