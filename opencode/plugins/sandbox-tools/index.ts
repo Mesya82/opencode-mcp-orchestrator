@@ -2044,10 +2044,201 @@ export function resolveContainerRunWorkdir(
     : resolve(selected.destination, suffix)
 }
 
+export async function runCancellableLoggedProcess(
+  command: string,
+  argv: readonly string[],
+  options: {
+    logPath: string
+    logLimitBytes: number
+    timeoutMs: number
+    signal?: AbortSignal
+  },
+): Promise<{
+  exitCode: number
+  timedOut: boolean
+  aborted: boolean
+  elapsedMs: number
+  truncated: boolean
+  spawnError?: Error
+}> {
+  const started = Date.now()
+  const logFd = openSync(
+    options.logPath,
+    "w",
+    0o600,
+  )
+  let written = 0
+  let truncated = false
+  let stderrStarted = false
+  let timedOut = false
+  let aborted = options.signal?.aborted === true
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let child:
+    | ReturnType<typeof spawn>
+    | undefined
+
+  const writeChunk = (chunk: unknown) => {
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (written < options.logLimitBytes) {
+      const keep = buffer.subarray(
+        0,
+        Math.max(
+          0,
+          options.logLimitBytes - written,
+        ),
+      )
+
+      if (keep.length > 0) {
+        writeSync(logFd, keep)
+        written += keep.length
+      }
+
+      if (keep.length !== buffer.length) {
+        truncated = true
+      }
+    } else if (buffer.length > 0) {
+      truncated = true
+    }
+  }
+
+  const writeStderr = (chunk: unknown) => {
+    if (!stderrStarted) {
+      stderrStarted = true
+      writeChunk(Buffer.from("\n[stderr]\n"))
+    }
+
+    writeChunk(chunk)
+  }
+
+  const killChild = () => {
+    try {
+      child?.kill("SIGKILL")
+    } catch {
+      // Already exited.
+    }
+  }
+
+  const onAbort = () => {
+    aborted = true
+    killChild()
+  }
+
+  try {
+    child = spawn(
+      command,
+      [...argv],
+      {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          PATH: "/usr/bin:/bin",
+        },
+      },
+    )
+
+    child.stdout?.on("data", writeChunk)
+    child.stderr?.on("data", writeStderr)
+
+    if (options.signal) {
+      options.signal.addEventListener(
+        "abort",
+        onAbort,
+        { once: true },
+      )
+    }
+
+    if (aborted) {
+      killChild()
+    }
+
+    timer = setTimeout(() => {
+      timedOut = true
+      killChild()
+    }, options.timeoutMs)
+
+    const completion =
+      await new Promise<{
+        code: number | null
+        signal: NodeJS.Signals | null
+        error?: Error
+      }>((resolveCompletion) => {
+        let settled = false
+
+        const finish = (
+          value: {
+            code: number | null
+            signal: NodeJS.Signals | null
+            error?: Error
+          },
+        ) => {
+          if (settled) return
+          settled = true
+          resolveCompletion(value)
+        }
+
+        child!.once(
+          "error",
+          (error) => finish({
+            code: null,
+            signal: null,
+            error,
+          }),
+        )
+
+        child!.once(
+          "close",
+          (code, signal) => finish({
+            code,
+            signal,
+          }),
+        )
+      })
+
+    const exitCode =
+      Number.isInteger(completion.code)
+        ? completion.code!
+        : timedOut
+          ? 124
+          : aborted
+            ? 130
+            : 1
+
+    return {
+      exitCode,
+      timedOut,
+      aborted,
+      elapsedMs: Date.now() - started,
+      truncated,
+      ...(completion.error
+        ? { spawnError: completion.error }
+        : {}),
+    }
+  } finally {
+    if (timer) {
+      clearTimeout(timer)
+    }
+
+    options.signal?.removeEventListener(
+      "abort",
+      onAbort,
+    )
+
+    closeSync(logFd)
+  }
+}
+
 async function executeContainerRun(
   sessionID: string,
   input: ContainerRunInput,
+  abortSignal?: AbortSignal,
 ): Promise<{ content: string }> {
+  if (abortSignal?.aborted) {
+    throw new Error("container_run cancelled")
+  }
+
   const capability =
     readWorkerContainerCapability(sessionID)
   const { runtime, inspect } =
@@ -2089,55 +2280,25 @@ async function executeContainerRun(
   const beforeStatus =
     gitStatus(capability.hostCwd)
 
-  const started = Date.now()
-  const result = spawnSync(
-    runtime,
-    buildContainerExecArgs(
-      capability.container,
-      input.argv,
-      workdir,
-    ),
-    {
-      encoding: "utf8",
-      timeout: timeoutSeconds * 1000,
-      maxBuffer: limits.runnerLogLimitBytes,
-      env: {
-        PATH: "/usr/bin:/bin",
+  const result =
+    await runCancellableLoggedProcess(
+      runtime,
+      buildContainerExecArgs(
+        capability.container,
+        input.argv,
+        workdir,
+      ),
+      {
+        logPath: combinedLog,
+        logLimitBytes:
+          limits.runnerLogLimitBytes,
+        timeoutMs:
+          timeoutSeconds * 1000,
+        signal: abortSignal,
       },
-    },
-  )
-  const elapsedMs = Date.now() - started
+    )
 
-  const timedOut =
-    isSpawnTimeout(result)
-  const truncated =
-    (result.error as NodeJS.ErrnoException | undefined)
-      ?.code === "ENOBUFS"
-
-  const stdout =
-    typeof result.stdout === "string"
-      ? result.stdout
-      : ""
-  const stderr =
-    typeof result.stderr === "string"
-      ? result.stderr
-      : ""
-
-  writeFileSync(
-    combinedLog,
-    [
-      stdout,
-      stderr
-        ? `\n[stderr]\n${stderr}`
-        : "",
-    ].join(""),
-    {
-      encoding: "utf8",
-      mode: 0o600,
-    },
-  )
-
-  if (truncated) {
+  if (result.truncated) {
     writeFileSync(
       join(runDir, "truncated"),
       "1",
@@ -2145,21 +2306,16 @@ async function executeContainerRun(
     )
   }
 
-  const exitCode =
-    Number.isInteger(result.status)
-      ? result.status
-      : timedOut
-        ? 124
-        : 1
-
   writeFileSync(
     join(runDir, "exit_code"),
-    String(exitCode),
+    String(result.exitCode),
     { mode: 0o600 },
   )
 
   const afterStatus =
-    gitStatus(capability.hostCwd)
+    result.aborted
+      ? beforeStatus
+      : gitStatus(capability.hostCwd)
   const delta =
     statusDelta(beforeStatus, afterStatus)
   const bytes =
@@ -2170,14 +2326,15 @@ async function executeContainerRun(
   return {
     content: [
       `run_id=${runID}`,
-      `exit_code=${exitCode}`,
-      `timed_out=${timedOut}`,
-      `elapsed_ms=${elapsedMs}`,
+      `exit_code=${result.exitCode}`,
+      `timed_out=${result.timedOut}`,
+      `cancelled=${result.aborted}`,
+      `elapsed_ms=${result.elapsedMs}`,
       `log_bytes=${bytes}`,
-      `log_truncated=${truncated}`,
+      `log_truncated=${result.truncated}`,
       `workspace_access=${capability.workspaceAccess}`,
       "network_access=inherit",
-      `container_workdir=${workdir ?? "<container-default>"}`,
+      `container_workdir=${workdir}`,
       `worktree_status_changed=${delta.length > 0}`,
       delta.length > 0
         ? "worktree_status_delta:\n" +
@@ -2186,11 +2343,18 @@ async function executeContainerRun(
             6000,
           )
         : "worktree_status_delta:",
+      result.spawnError
+        ? "launcher_error:\n" +
+          truncate(
+            result.spawnError.message,
+            5000,
+          )
+        : "launcher_error:",
       tail
         ? "log_tail:\n" + tail
         : "log_tail:",
       "",
-      "Use sandbox_log with this run_id to search or inspect the persisted full log.",
+      "Use sandbox_log with this run_id to search or inspect the persisted log up to the configured safety cap.",
     ].join("\n"),
   }
 }
@@ -2495,9 +2659,15 @@ export default Plugin.define({
         },
 
         execute: async (input, context) => {
+          const toolContext =
+            context as
+              | {
+                  sessionID?: unknown
+                  abort?: AbortSignal
+                }
+              | undefined
           const sessionID =
-            (context as { sessionID?: unknown } | undefined)
-              ?.sessionID
+            toolContext?.sessionID
 
           if (typeof sessionID !== "string") {
             throw new Error(
@@ -2508,6 +2678,7 @@ export default Plugin.define({
           return executeContainerRun(
             sessionID,
             input as ContainerRunInput,
+            toolContext?.abort,
           )
         },
       })
