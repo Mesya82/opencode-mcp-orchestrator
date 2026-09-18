@@ -659,6 +659,8 @@ test ! -e "$STATE" || \
 for managed_path in \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-scout.md" \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-worker.md" \
+  "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-worker-container.md" \
+  "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-worker-container-readonly.md" \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner.md" \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner-writable.md" \
   "$XDG_CONFIG_HOME/opencode/agents/opencode-orchestrator-runner-network.md" \
