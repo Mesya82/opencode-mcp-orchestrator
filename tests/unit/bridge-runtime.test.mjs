@@ -1499,6 +1499,64 @@ test("late container capability creation is removed after timeout cleanup", asyn
   resetBridgeStateForTests()
 })
 
+test("active container execution keeps writer quarantined after session cleanup", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-active-", async (dir) => {
+    const { client } = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "container worker task",
+        "opencode-orchestrator-worker-container",
+        "worker",
+        {
+          client,
+          model: stubModel,
+          timeoutMs: 5000,
+          workerContainerCapabilityRoot: join(dir, "caps"),
+          workerExecution: {
+            kind: "existing_container",
+            container: "dev-box",
+            workspaceAccess: "writable",
+            containerCwd: "auto",
+            networkAccess: "inherit",
+          },
+          workerContainerActivityLstat: async () => ({
+            isFile: () => true,
+          }),
+        },
+      ),
+      /quarantined/,
+    )
+
+    const blocked = makeFakeClient()
+
+    await assert.rejects(
+      () => runAgent(
+        dir,
+        "second writer",
+        "opencode-orchestrator-worker",
+        "worker",
+        {
+          client: blocked.client,
+          model: stubModel,
+          timeoutMs: 5000,
+        },
+      ),
+      /quarantined/,
+    )
+
+    assert.equal(
+      callNames(blocked.calls, "create").length,
+      0,
+    )
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("writer quarantine frees only after confirmed removal", async () => {
   resetBridgeStateForTests()
 
