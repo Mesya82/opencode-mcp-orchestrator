@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin"
+import { randomUUID } from "node:crypto"
 import {
   chmodSync,
   closeSync,
@@ -34,6 +35,7 @@ import {
 
 import {
   WORKER_CONTAINER_CAPABILITY_ROOT,
+  workerContainerActivityPath,
   workerContainerCapabilityPath,
 } from "../../../config/worker-container-capability.mjs"
 
@@ -1915,6 +1917,7 @@ export function buildContainerExecArgs(
   container: string,
   argv: readonly string[],
   workdir?: string,
+  interactive = false,
 ): string[] {
   if (
     !Array.isArray(argv) ||
@@ -1926,6 +1929,7 @@ export function buildContainerExecArgs(
 
   return [
     "exec",
+    ...(interactive ? ["-i"] : []),
     ...(workdir
       ? ["--workdir", workdir]
       : []),
