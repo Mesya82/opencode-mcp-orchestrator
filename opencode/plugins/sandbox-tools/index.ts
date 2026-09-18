@@ -2331,6 +2331,20 @@ export async function runCancellableLoggedProcess(
 
 const MANAGED_DETACHED_PROCESS_EXIT_CODE = 197
 
+const MANAGED_CONTAINER_LAUNCHER = [
+  'inner="$1"',
+  'shift',
+  'token="$1"',
+  'shift',
+  '',
+  'if ! command -v setsid >/dev/null 2>&1; then',
+  '  printf "%s:error:setsid-unavailable\\n" "$token"',
+  '  exit 126',
+  'fi',
+  '',
+  'exec setsid /bin/sh -c "$inner" sh "$token" "$@"',
+].join("\n")
+
 const MANAGED_CONTAINER_WRAPPER = [
   "token=\"$1\"",
   "shift",
@@ -2817,8 +2831,9 @@ export async function runManagedContainerProcess(
         [
           "/bin/sh",
           "-c",
-          MANAGED_CONTAINER_WRAPPER,
+          MANAGED_CONTAINER_LAUNCHER,
           "sh",
+          MANAGED_CONTAINER_WRAPPER,
           token,
           ...argv,
         ],
