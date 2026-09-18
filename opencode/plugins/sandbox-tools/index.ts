@@ -2522,6 +2522,166 @@ const MANAGED_CONTAINER_TERMINATE = [
   "exit 5",
 ].join("\n")
 
+const MANAGED_CONTAINER_PROCESS_SNAPSHOT = [
+  'for path in /proc/[0-9]*; do',
+  '  pid="${path##*/}"',
+  '  [ "$pid" = "$$" ] && continue',
+  '  IFS= read -r stat < "$path/stat" || continue',
+  '  rest="${stat##*) }"',
+  '  set -- $rest',
+  '  state="$1"',
+  '  starttime="${20}"',
+  '  [ "$state" = "Z" ] && continue',
+  '  printf "%s:%s\\n" "$pid" "$starttime"',
+  'done',
+].join("\n")
+
+async function snapshotManagedContainerProcesses(
+  runtime: string,
+  container: string,
+): Promise<Set<string> | null> {
+  const child = spawn(
+    runtime,
+    buildContainerExecArgs(
+      container,
+      [
+        "/bin/sh",
+        "-c",
+        MANAGED_CONTAINER_PROCESS_SNAPSHOT,
+      ],
+    ),
+    {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: containerRuntimeEnv(),
+    },
+  )
+
+  let stdout = Buffer.alloc(0)
+  let stderrBytes = 0
+  let overflowed = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  child.stdout?.on("data", (chunk) => {
+    const buffer =
+      Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk))
+
+    if (stdout.length + buffer.length > 1024 * 1024) {
+      overflowed = true
+
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        // Already exited.
+      }
+
+      return
+    }
+
+    stdout = Buffer.concat([stdout, buffer])
+  })
+
+  child.stderr?.on("data", (chunk) => {
+    stderrBytes +=
+      Buffer.isBuffer(chunk)
+        ? chunk.length
+        : Buffer.byteLength(String(chunk))
+
+    if (stderrBytes > 64 * 1024) {
+      overflowed = true
+
+      try {
+        child.kill("SIGKILL")
+      } catch {
+        // Already exited.
+      }
+    }
+  })
+
+  try {
+    const completion =
+      await Promise.race([
+        new Promise<{
+          code: number | null
+          error?: Error
+        }>((resolveCompletion) => {
+          let settled = false
+
+          const finish = (
+            value: {
+              code: number | null
+              error?: Error
+            },
+          ) => {
+            if (settled) return
+            settled = true
+            resolveCompletion(value)
+          }
+
+          child.once(
+            "error",
+            (error) => finish({
+              code: null,
+              error,
+            }),
+          )
+
+          child.once(
+            "close",
+            (code) => finish({ code }),
+          )
+        }),
+        new Promise<{
+          code: null
+          error: Error
+        }>((resolveTimeout) => {
+          timer = setTimeout(() => {
+            try {
+              child.kill("SIGKILL")
+            } catch {
+              // Already exited.
+            }
+
+            resolveTimeout({
+              code: null,
+              error: new Error(
+                "container process snapshot timed out",
+              ),
+            })
+          }, 5_000)
+        }),
+      ])
+
+    if (
+      completion.code !== 0 ||
+      completion.error ||
+      overflowed
+    ) {
+      return null
+    }
+
+    const lines =
+      stdout
+        .toString("utf8")
+        .split("\n")
+        .filter(Boolean)
+
+    if (
+      lines.some(
+        (line) =>
+          !/^[1-9][0-9]*:[0-9]+$/.test(line),
+      )
+    ) {
+      return null
+    }
+
+    return new Set(lines)
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 async function terminateManagedContainerProcess(
   runtime: string,
   container: string,
@@ -2640,6 +2800,18 @@ export async function runManagedContainerProcess(
   const token =
     "opencode-" +
     randomUUID().replaceAll("-", "")
+  const processBaseline =
+    await snapshotManagedContainerProcesses(
+      runtime,
+      container,
+    )
+
+  if (!processBaseline) {
+    throw new Error(
+      "container_run could not establish a process baseline for fail-closed descendant tracking",
+    )
+  }
+
   const logFd = openSync(
     options.logPath,
     "w",
@@ -2959,15 +3131,26 @@ export async function runManagedContainerProcess(
       )
   }
 
+  if (commandStarted) {
+    const processAfter =
+      await snapshotManagedContainerProcesses(
+        runtime,
+        container,
+      )
+
+    if (
+      !processAfter ||
+      [...processAfter].some(
+        (entry) => !processBaseline.has(entry),
+      )
+    ) {
+      terminationConfirmed = false
+    }
+  }
+
   if (
     !commandStarted ||
-    (
-      !detachedDescendantsDetected &&
-      (
-        !needsTermination ||
-        terminationConfirmed
-      )
-    )
+    terminationConfirmed
   ) {
     rmSync(
       options.activityPath,
