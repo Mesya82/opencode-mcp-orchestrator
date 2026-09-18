@@ -364,6 +364,8 @@ for (
   of [
     "scout",
     "worker",
+    "worker-container",
+    "worker-container-readonly",
     "runner",
     "runner-writable",
     "runner-network",
