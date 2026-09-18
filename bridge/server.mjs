@@ -40,6 +40,7 @@ import {
 
 import {
   WORKER_CONTAINER_CAPABILITY_ROOT,
+  workerContainerActivityPath,
   workerContainerCapabilityPath,
 } from "../config/worker-container-capability.mjs"
 
@@ -1392,6 +1393,28 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
   let operationError
   let quarantineError
   let workerContainerCapabilityFile
+  let workerContainerActivityFile
+
+  const workerContainerExecutionActive = async () => {
+    if (!workerContainerActivityFile) return false
+
+    const activityLstat =
+      overrides.workerContainerActivityLstat ?? lstat
+
+    try {
+      await activityLstat(workerContainerActivityFile)
+      return true
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        return false
+      }
+
+      debug(
+        `failed to inspect worker container activity marker ${workerContainerActivityFile}: ${error?.message ?? error}`
+      )
+      return true
+    }
+  }
 
   /*
    * Exactly-once session cleanup/preservation. The outer finally runs it
@@ -1456,6 +1479,11 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
       return
     }
 
+    if (await workerContainerExecutionActive()) {
+      quarantineWriter(directory, sessionID)
+      return
+    }
+
     if (result?.removeConfirmed === true) {
       const current = writerDirectoryStates.get(directory)
 
@@ -1513,6 +1541,11 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
          */
         workerContainerCapabilityFile =
           workerContainerCapabilityPath(
+            sessionID,
+            capabilityRoot,
+          )
+        workerContainerActivityFile =
+          workerContainerActivityPath(
             sessionID,
             capabilityRoot,
           )
@@ -1655,8 +1688,14 @@ export async function runAgent(directoryArg, task, agent, role, overrides = {}) 
     if (takesWriterLock) {
       const confirmed = cleanupResult?.removeConfirmed === true
       const preserved = cleanupResult?.preserved === true
+      const containerExecutionActive =
+        await workerContainerExecutionActive()
 
-      if (confirmed) {
+      if (containerExecutionActive) {
+        quarantineWriter(directory, sessionID)
+        quarantineError =
+          new Error(writerQuarantineMessage(directory))
+      } else if (confirmed) {
         clearWriterState(directory)
       } else if (preserved) {
         preserveWriter(directory, sessionID)
