@@ -1728,6 +1728,59 @@ const CONTAINER_RUNTIME_PATH_ENV_KEYS = [
   "CONTAINERS_REGISTRIES_CONF",
 ] as const
 
+export function validateLocalContainerHost(
+  value: string,
+): string {
+  if (
+    typeof value !== "string" ||
+    value === "" ||
+    /[\0\r\n]/.test(value) ||
+    value.includes("%") ||
+    value.includes("\\")
+  ) {
+    throw new Error(
+      "invalid CONTAINER_HOST for existing-container runtime",
+    )
+  }
+
+  let parsed: URL
+
+  try {
+    parsed = new URL(value)
+  } catch {
+    throw new Error(
+      "invalid CONTAINER_HOST for existing-container runtime",
+    )
+  }
+
+  if (
+    parsed.protocol !== "unix:" ||
+    parsed.username !== "" ||
+    parsed.password !== "" ||
+    parsed.hostname !== "" ||
+    parsed.port !== "" ||
+    parsed.search !== "" ||
+    parsed.hash !== "" ||
+    !parsed.pathname.startsWith("/") ||
+    parsed.pathname === "/"
+  ) {
+    throw new Error(
+      "CONTAINER_HOST must be a local unix:///absolute/path endpoint",
+    )
+  }
+
+  const normalized =
+    resolve(parsed.pathname)
+
+  if (normalized !== parsed.pathname) {
+    throw new Error(
+      "CONTAINER_HOST must use a canonical absolute Unix-socket path",
+    )
+  }
+
+  return `unix://${normalized}`
+}
+
 export function containerRuntimeEnv(
   source: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
@@ -1754,10 +1807,20 @@ export function containerRuntimeEnv(
     result[key] = value
   }
 
+  if (
+    source.CONTAINER_HOST !== undefined &&
+    source.CONTAINER_HOST !== ""
+  ) {
+    result.CONTAINER_HOST =
+      validateLocalContainerHost(
+        source.CONTAINER_HOST,
+      )
+  }
+
   return result
 }
 
-const FIXED_RUNTIME_SOCKET_PATHS = [
+const SYSTEM_RUNTIME_SOCKET_PATHS = [
   "/run/docker.sock",
   "/var/run/docker.sock",
   "/run/podman/podman.sock",
@@ -1767,29 +1830,56 @@ const FIXED_RUNTIME_SOCKET_PATHS = [
   "/var/run/crio/crio.sock",
 ]
 
+function rootlessRuntimeSocketPaths(
+  uid: string,
+): string[] {
+  const root = `/run/user/${uid}`
+
+  return [
+    `${root}/docker.sock`,
+    `${root}/docker/docker.sock`,
+    `${root}/podman/podman.sock`,
+    `${root}/containerd/containerd.sock`,
+    `${root}/containerd-rootless/api.sock`,
+  ]
+}
+
 function sourceMayContainRuntimeSocket(
   source: string,
 ): boolean {
   if (!isAbsolute(source)) return false
 
   const normalized = resolve(source)
+  const candidates = [
+    ...SYSTEM_RUNTIME_SOCKET_PATHS,
+  ]
 
-  for (const socketPath of FIXED_RUNTIME_SOCKET_PATHS) {
-    if (
+  if (
+    normalized === "/run" ||
+    normalized === "/run/user"
+  ) {
+    return true
+  }
+
+  const rootlessMatch =
+    normalized.match(
+      /^\/run\/user\/([0-9]+)(?:\/.*)?$/,
+    )
+
+  if (rootlessMatch) {
+    candidates.push(
+      ...rootlessRuntimeSocketPaths(
+        rootlessMatch[1]!,
+      ),
+    )
+  }
+
+  return candidates.some(
+    (socketPath) =>
       pathIsWithin(
         normalized,
         resolve(socketPath),
-      )
-    ) {
-      return true
-    }
-  }
-
-  return (
-    normalized === "/run/user" ||
-    /^\/run\/user\/[0-9]+(?:\/podman(?:\/podman\.sock)?)?$/.test(
-      normalized,
-    )
+      ),
   )
 }
 
