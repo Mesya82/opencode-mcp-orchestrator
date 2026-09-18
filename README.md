@@ -437,8 +437,11 @@ development container. No named profile is required:
 The default remains the existing isolated sandbox. For
 `kind: "existing_container"`, `workspace_access` defaults to `"writable"`,
 `container_cwd` defaults to `"auto"`, and `network_access` is accurately
-reported as `"inherit"`. The bridge binds the selected container to the
-OpenCode session before prompting the Worker. The model-visible
+reported as `"inherit"`. Auto cwd resolution derives the container destination
+from the inspected mount table using the canonical host worktree as the source;
+if no mount proves that mapping, the call fails and the parent must provide an
+explicit absolute `container_cwd`. The bridge binds the selected container to
+the OpenCode session before prompting the Worker. The model-visible
 `container_run` tool accepts only an argv array, optional absolute workdir, and
 timeout; it has no container/runtime/network selector and does not expose
 Podman/Docker binaries or sockets as general-purpose tools.
