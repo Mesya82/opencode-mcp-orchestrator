@@ -2717,7 +2717,7 @@ export async function runManagedContainerProcess(
         version: 1,
         container,
         token,
-      }) + "\\n",
+      }) + "\n",
       {
         encoding: "utf8",
         mode: 0o600,
@@ -2734,7 +2734,6 @@ export async function runManagedContainerProcess(
     | undefined
   let controlBuffer = Buffer.alloc(0)
   let rootPid: number | undefined
-  let commandStarted = false
   let stderrStarted = false
   let timedOut = false
   let aborted = options.signal?.aborted === true
@@ -2873,9 +2872,8 @@ export async function runManagedContainerProcess(
 
     try {
       child?.stdin?.write(
-        token + ":go\\n",
+        token + ":go\n",
       )
-      commandStarted = true
     } catch (error) {
       protocolError =
         error instanceof Error
