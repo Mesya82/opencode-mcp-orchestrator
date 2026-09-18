@@ -1557,6 +1557,84 @@ test("active container execution keeps writer quarantined after session cleanup"
   resetBridgeStateForTests()
 })
 
+test("late reconciliation clears container quarantine only after activity disappears", async () => {
+  resetBridgeStateForTests()
+
+  await withTempDir("bridge-container-activity-release-", async (dir) => {
+    let active = true
+    let activityChecks = 0
+    const { client } = makeFakeClient()
+
+    const result = await runAgent(
+      dir,
+      "container worker task",
+      "opencode-orchestrator-worker-container",
+      "worker",
+      {
+        client,
+        model: stubModel,
+        timeoutMs: 5000,
+        workerContainerCapabilityRoot: join(dir, "caps"),
+        workerExecution: {
+          kind: "existing_container",
+          container: "dev-box",
+          workspaceAccess: "writable",
+          containerCwd: "auto",
+          networkAccess: "inherit",
+        },
+        workerContainerActivityLstat: async () => {
+          activityChecks += 1
+
+          if (active) {
+            return {
+              isFile: () => true,
+            }
+          }
+
+          const error = new Error("missing")
+          error.code = "ENOENT"
+          throw error
+        },
+      },
+    ).catch((error) => error)
+
+    assert.match(
+      result.message,
+      /quarantined/,
+    )
+
+    active = false
+
+    await waitFor(async () => {
+      const recovered = makeFakeClient()
+
+      try {
+        assert.equal(
+          await runAgent(
+            dir,
+            "recovered writer",
+            "opencode-orchestrator-worker",
+            "worker",
+            {
+              client: recovered.client,
+              model: stubModel,
+              timeoutMs: 5000,
+            },
+          ),
+          "hello",
+        )
+        return true
+      } catch {
+        return false
+      }
+    })
+
+    assert.ok(activityChecks >= 2)
+  })
+
+  resetBridgeStateForTests()
+})
+
 test("writer quarantine frees only after confirmed removal", async () => {
   resetBridgeStateForTests()
 
