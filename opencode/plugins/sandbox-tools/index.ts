@@ -1942,9 +1942,9 @@ export function resolveExistingContainerRuntime(
         encoding: "utf8",
         timeout: 15_000,
         maxBuffer: 2 * 1024 * 1024,
-        env: {
-          PATH: "/usr/bin:/bin",
-        },
+        env: containerRuntimeEnv(
+          options?.env ?? process.env,
+        ),
       },
     )
 
@@ -2501,6 +2501,7 @@ async function terminateManagedContainerProcess(
   runtime: string,
   container: string,
   rootPid: number,
+  token: string,
 ): Promise<boolean> {
   const child = spawn(
     runtime,
@@ -2512,13 +2513,12 @@ async function terminateManagedContainerProcess(
         MANAGED_CONTAINER_TERMINATE,
         "sh",
         String(rootPid),
+        token,
       ],
     ),
     {
       stdio: ["ignore", "ignore", "ignore"],
-      env: {
-        PATH: "/usr/bin:/bin",
-      },
+      env: containerRuntimeEnv(),
     },
   )
 
@@ -2827,9 +2827,7 @@ export async function runManagedContainerProcess(
       ),
       {
         stdio: ["pipe", "pipe", "pipe"],
-        env: {
-          PATH: "/usr/bin:/bin",
-        },
+        env: containerRuntimeEnv(),
       },
     )
 
@@ -2905,6 +2903,10 @@ export async function runManagedContainerProcess(
     completion?.signal !== null ||
     !Number.isInteger(completion?.code)
 
+  const detachedDescendantsDetected =
+    completion?.code ===
+      MANAGED_DETACHED_PROCESS_EXIT_CODE
+
   const needsTermination =
     commandStarted &&
     (
@@ -2915,7 +2917,8 @@ export async function runManagedContainerProcess(
       abnormalLauncherExit
     )
 
-  let terminationConfirmed = true
+  let terminationConfirmed =
+    !detachedDescendantsDetected
 
   if (
     needsTermination &&
@@ -2926,6 +2929,7 @@ export async function runManagedContainerProcess(
         runtime,
         container,
         rootPid,
+        token,
       )
   }
 
@@ -2958,6 +2962,13 @@ export async function runManagedContainerProcess(
     elapsedMs: Date.now() - started,
     truncated,
     terminationConfirmed,
+    ...(detachedDescendantsDetected
+      ? {
+          spawnError: new Error(
+            "container_run detected live processes created during the command after its root process exited",
+          ),
+        }
+      : {}),
     ...(completion?.error
       ? { spawnError: completion.error }
       : {}),
