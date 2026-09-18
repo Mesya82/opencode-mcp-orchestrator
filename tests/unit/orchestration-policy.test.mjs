@@ -88,9 +88,13 @@ test("deterministic infrastructure failures are remembered by effective executio
 test("direct root production edits have a mechanical tiny-fix boundary", () => {
   const required = [
     "Sol may directly perform a tiny integration correction only when all of these are true",
+    "the exact edit location is already known",
     "the correction is confined to one existing file",
     "no new helper, function, or control-flow block is required",
     "no new file is required",
+    "no non-trivial diagnostic, test, or probe script is required",
+    "no investigation is required to determine the implementation",
+    "one focused verification should be enough to settle the correction",
     "the same direct correction fails verification once",
     "investigation plus implementation is required",
     "multiple related production edits are needed",
@@ -102,9 +106,13 @@ test("direct root production edits have a mechanical tiny-fix boundary", () => {
     policyDoc,
     [
       "## Mechanical tiny-direct-fix boundary",
+      "the exact edit location is already known",
       "the correction is confined to one existing file",
       "no new helper/function/control-flow block is required",
       "no new file is required",
+      "no non-trivial diagnostic/test/probe script is required",
+      "no investigation is required to determine the implementation",
+      "one focused verification should be enough to settle the correction",
       "the direct correction fails focused verification once",
       "investigation plus implementation is required",
       "multiple related production edits are needed",
